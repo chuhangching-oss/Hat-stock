@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-slate-100 text-slate-900 antialiased;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none; /* 避免整頁被下拉彈跳 */
+}
+
+/* iOS Safari 聚焦輸入框時會自動放大畫面，字級 >= 16px 可避免 */
+input,
+select,
+textarea,
+button {
+  font-size: 16px;
+}
+
+/* 隱藏 number input 的上下箭頭，畫面更乾淨 */
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type='number'] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+@layer components {
+  .btn-primary {
+    @apply min-h-touch inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-blue-700 px-4 text-lg font-bold text-white shadow-card transition active:bg-blue-800 active:scale-[0.98];
+  }
+  .btn-secondary {
+    @apply min-h-touch inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-white px-4 text-lg font-bold text-blue-700 ring-2 ring-blue-700 transition active:bg-blue-50 active:scale-[0.98];
+  }
+  .field-label {
+    @apply mb-1.5 block text-sm font-bold text-slate-600;
+  }
+  .field-input {
+    @apply min-h-touch w-full rounded-2xl border-2 border-slate-200 bg-white px-4 text-lg font-semibold text-slate-900 outline-none transition placeholder:font-normal placeholder:text-slate-300 focus:border-blue-600;
+  }
+}
