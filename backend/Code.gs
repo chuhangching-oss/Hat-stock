@@ -15,10 +15,15 @@
  *   { action: "list",  }                            → 整份庫存主檔陣列
  *   { action: "get",   item_code }                  → 單一料件
  *   { action: "log",   type, item_code, qty,
- *                     operator, remark, force }     → 記一筆異動並更新庫存
+ *                     operator, remark, force,
+ *                     new_item }                    → 記一筆異動並更新庫存
  *       type   : "入庫" | "出庫" | "盤點"
  *       盤點   : qty = 盤點後實際庫存量（可為 0），Change_Qty = qty - 原庫存
  *       force  : true 允許出庫後形成負庫存（前端已在彈窗二次確認過）
+ *       new_item：僅入庫可用。品號不存在於主檔時，附上此物件即可
+ *                 直接建立新品項並入庫：
+ *                   { item_code(留空→自動編號A####), item_name(必填),
+ *                     category, color_spec, unit(預設PCS), location }
  *
  * 回應：{ ok: true, data: ... } 或 { ok: false, error: "訊息" }
  **************************************************************************/
@@ -178,6 +183,13 @@ function recordLog_(req) {
   try {
     var master = getSheet_(SHEET_MASTER);
     var row = findMasterRow_(master, code);
+    var isNewItem = false;
+    // 入庫新品項：品號不存在且附 new_item → 先建立主檔列再入庫
+    if (row === -1 && type === '入庫' && req.new_item && typeof req.new_item === 'object') {
+      row = createMasterRow_(master, req.new_item, code);
+      code = String(master.getRange(row, 1).getValue()); // 自動編號後的實際品號
+      isNewItem = true;
+    }
     if (row === -1) throw new Error('品號不存在於 INVENTORY_MASTER：' + code);
 
     var colQty = 5; // Stock_Qty 所在欄（第 5 欄 E）
@@ -213,6 +225,7 @@ function recordLog_(req) {
     return {
       log_id: logId,
       item_code: code,
+      is_new_item: isNewItem,
       balance_before: current,
       balance_after: after,
       change: change,
@@ -338,6 +351,52 @@ function findMasterRow_(sheet, code) {
     if (String(codes[i][0]).trim().toUpperCase() === target) return i + 2;
   }
   return -1;
+}
+
+/**
+ * 建立新品項主檔列（入庫新品項用，須在 LockService 保護下呼叫）
+ * newItem = { item_name(必填), category?, color_spec?, unit?, location? }
+ * codeHint：自訂品號（留空 → nextItemCode_ 自動編號 A####）
+ * 新品項庫存由 0 起算，回傳新列列號
+ */
+function createMasterRow_(master, newItem, codeHint) {
+  var name = String(newItem.item_name || '').trim();
+  if (!name) throw new Error('建立新品項需填寫品名 Item_Name');
+  var code = String(codeHint || newItem.item_code || '').trim().toUpperCase();
+  if (!code) {
+    code = nextItemCode_(master);
+  } else if (findMasterRow_(master, code) !== -1) {
+    throw new Error('品號已存在，不可重複建立：' + code);
+  }
+  ensureSheet_(SHEET_MASTER); // 舊表補上 Photo_URL 等標題（不影響既有資料）
+  master.appendRow([
+    code,
+    name,
+    String(newItem.category || '').trim(),
+    String(newItem.color_spec || '').trim(),
+    0,
+    String(newItem.unit || '').trim() || 'PCS',
+    String(newItem.location || '').trim(),
+    now_(),
+    '', // Photo_URL
+  ]);
+  return master.getLastRow();
+}
+
+/** 自動編號：取主檔中 A#### 型品號最大序號 + 1，並避開已使用的品號 */
+function nextItemCode_(master) {
+  var last = master.getLastRow();
+  var max = 0;
+  if (last >= 2) {
+    var codes = master.getRange(2, 1, last - 1, 1).getValues();
+    for (var i = 0; i < codes.length; i++) {
+      var m = String(codes[i][0]).trim().match(/^A(\d+)$/i);
+      if (m) max = Math.max(max, parseInt(m[1], 10));
+    }
+  }
+  var n = max + 1;
+  while (findMasterRow_(master, 'A' + ('0000' + n).slice(-4)) !== -1) n++;
+  return 'A' + ('0000' + n).slice(-4);
 }
 
 /** 工作表一列 → 前端資料物件 */

@@ -106,7 +106,8 @@ npm run dev
 |---|---|---|---|---|---|---|
 | L20261027… | 2026-… | 出庫 | KN-CAP-001 | -12 | 陳大明 | WO-2026-1130-A |
 
-新增料件直接在 INVENTORY_MASTER 插入列填入即可（Last_Updated 系統會自動維護）；
+新增料件可直接在 App「出入庫」分頁按「➕ 直接入庫新品項」（品號留空會自動編號 A####），
+或直接在 INVENTORY_MASTER 插入列填入（Last_Updated 系統會自動維護）；
 `Type` 支援：**入庫**（+數量）、**出庫**（−數量）、**盤點**（設定為盤點後實際庫存量）。
 
 ### API 協定（給日後擴充參考）
@@ -117,6 +118,10 @@ POST { action:"list" }                                   → 整份庫存主檔
 POST { action:"get",  item_code }                         → 單一料件
 POST { action:"log",  type:"入庫", item_code, qty,
        operator, remark, force }                          → 記錄異動 + 更新庫存
+POST { action:"log",  type:"入庫", item_code, qty, …,
+       new_item:{ item_code?, item_name, category?,
+                  color_spec?, unit?, location? } }       → 品號不存在時
+       先建立新品項（item_code 留空 → 自動編號 A####）再入庫
 回應固定為 { ok:true, data:… } 或 { ok:false, error:"…" }
 ```
 

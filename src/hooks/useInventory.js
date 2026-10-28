@@ -40,8 +40,9 @@ export default function useInventory() {
   /**
    * 送出一筆異動（入庫/出庫/盤點）
    * 成功後以 API 回傳的最新庫存更新本地清單
+   * 入庫新品項時附 new_item，後端建立主檔後回傳新料件 → 加入本地清單
    */
-  const submitLog = useCallback(async ({ type, item_code, qty, operator, remark, force }) => {
+  const submitLog = useCallback(async ({ type, item_code, qty, operator, remark, force, new_item }) => {
     const data = await gasRequest(getGasUrl(), {
       action: 'log',
       type,
@@ -50,9 +51,17 @@ export default function useInventory() {
       operator,
       remark,
       force: !!force,
+      ...(new_item ? { new_item } : {}),
     });
     if (data && data.item) {
-      setItems((prev) => prev.map((it) => (it.item_code === data.item.item_code ? data.item : it)));
+      // 既有料件 → 更新庫存；新品項 → 加入清單（維持品號排序）
+      setItems((prev) => {
+        const exists = prev.some((it) => it.item_code === data.item.item_code);
+        const next = exists
+          ? prev.map((it) => (it.item_code === data.item.item_code ? data.item : it))
+          : [...prev, data.item];
+        return next.sort((a, b) => String(a.item_code).localeCompare(String(b.item_code)));
+      });
       setLastSync(new Date());
     }
     return data;

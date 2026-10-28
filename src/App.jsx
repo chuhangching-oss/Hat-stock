@@ -54,8 +54,10 @@ export default function App() {
       try {
         const res = await inventory.submitLog(payload);
         const it = res.item;
+        // 顯示「品號 + 品名（顏色）」，現場一眼確認沒選錯料件
+        const nameWithColor = `${it.item_name}${it.color_spec ? `（${it.color_spec}）` : ''}`;
         showToast(
-          `✅ ${payload.type}成功：${it.item_code} → 目前庫存 ${it.stock_qty} ${it.unit}`,
+          `✅ ${payload.type}成功：${it.item_code} ${nameWithColor} → 目前庫存 ${it.stock_qty} ${it.unit}`,
           'success',
         );
         return res;
