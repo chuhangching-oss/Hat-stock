@@ -10,6 +10,30 @@ export const CATEGORY_COLORS = {
   成品: 'bg-violet-100 text-violet-700',
 };
 
+// ===== 數位圖鑑（Lookbook） =====
+
+// 帽型分類（Style_Category 欄候選值；最後一個「其他」可當空白時的歸類）
+export const STYLE_CATEGORIES = [
+  'Fedora 紳士帽',
+  'Casquette 報童帽',
+  'Beret 貝雷帽',
+  'Cap 棒球帽',
+  'Boonie 邊帽',
+  'Bucket 漁夫帽',
+  'Beanie 毛帽',
+  '其他',
+];
+
+// 季節分類（Season 欄候選值）
+export const SEASONS = ['SS', 'AW', '四季'];
+
+// 季節標籤顏色（圖鑑卡片徽章）
+export const SEASON_COLORS = {
+  SS: 'bg-amber-200 text-amber-800', // 春夏
+  AW: 'bg-indigo-200 text-indigo-800', // 秋冬
+  四季: 'bg-emerald-200 text-emerald-800',
+};
+
 // 工作令狀態標籤顏色（WORK_ORDERS.Status）
 export const WO_STATUS_COLORS = {
   生產中: 'bg-blue-100 text-blue-700',

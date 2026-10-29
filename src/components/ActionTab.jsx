@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { CATEGORY_COLORS, LOW_STOCK_THRESHOLD } from '../constants';
+import { CATEGORY_COLORS, LOW_STOCK_THRESHOLD, SEASONS, STYLE_CATEGORIES } from '../constants';
 import { getOperator, gasRequest, getGasUrl } from '../api';
 import PhotoButton from './PhotoButton';
 import ConfirmDialog from './ConfirmDialog';
@@ -36,6 +36,8 @@ const EMPTY_DRAFT = {
   category: '成品',
   unit: 'PCS',
   location: '',
+  style_category: '', // 帽型分類（圖鑑用，選填）
+  season: '',         // SS / AW / 四季（圖鑑用，選填）
 };
 
 /** 掃碼／手動輸入文字 → 對應料件（先比對序號，再比對品名） */
@@ -313,6 +315,9 @@ export default function ActionTab({
           category: draft.category,
           unit: draft.unit.trim() || 'PCS',
           location: draft.location.trim(),
+          style_category: draft.style_category,
+          season: draft.season,
+          is_public: 'Y',
         },
       });
       try {
@@ -516,6 +521,33 @@ export default function ActionTab({
               value={draft.location}
               onChange={setDraftField('location')}
             />
+          </div>
+          {/* 圖鑑屬性（選填） */}
+          <div className="flex gap-2">
+            <select
+              className="field-input flex-1"
+              value={draft.style_category}
+              onChange={(e) => setDraft((d) => ({ ...d, style_category: e.target.value }))}
+            >
+              <option value="">帽型分類（選填）</option>
+              {STYLE_CATEGORIES.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </select>
+            <select
+              className="field-input w-28 shrink-0"
+              value={draft.season}
+              onChange={(e) => setDraft((d) => ({ ...d, season: e.target.value }))}
+            >
+              <option value="">季節（選填）</option>
+              {SEASONS.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
           </div>
           <div>
             <label className="field-label">入庫數量（{draft.unit.trim() || 'PCS'}）</label>

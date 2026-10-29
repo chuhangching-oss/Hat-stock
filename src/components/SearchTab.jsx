@@ -170,10 +170,10 @@ export default function SearchTab({
               className={`rounded-3xl bg-white p-4 shadow-card ${low ? 'border-2 border-red-400' : 'border border-slate-100'}`}
             >
               {/* 款式照片（若有上傳） */}
-              {it.photo_url && (
-                <a href={it.photo_url} target="_blank" rel="noreferrer">
+              {it.image_url && (
+                <a href={it.image_url} target="_blank" rel="noreferrer">
                   <img
-                    src={it.photo_url}
+                    src={it.image_url}
                     alt={`款式照片 ${it.item_code}`}
                     loading="lazy"
                     className="mb-3 h-44 w-full rounded-2xl border border-slate-100 object-cover"

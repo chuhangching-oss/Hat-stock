@@ -106,7 +106,7 @@ export default function PhotoButton({ items, item = null, requirePick = false, o
                   >
                     <b>{it.item_name}</b>
                     {it.color_spec && <span className="text-slate-400">（{it.color_spec}）</span>}
-                    {it.photo_url && <span className="float-right text-xs text-violet-600">已有照片 ✓</span>}
+                    {it.image_url && <span className="float-right text-xs text-violet-600">已有照片 ✓</span>}
                   </button>
                 </li>
               ))}

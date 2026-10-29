@@ -7,6 +7,8 @@ import ActionTab from './components/ActionTab';
 import WorkOrderTab from './components/WorkOrderTab';
 import ShipmentTab from './components/ShipmentTab';
 import AnalyticsTab from './components/AnalyticsTab';
+import LookbookTab from './components/LookbookTab';
+import LookbookPublic from './components/LookbookPublic';
 import SettingsTab from './components/SettingsTab';
 import Scanner from './components/Scanner';
 import Toast from './components/Toast';
@@ -16,9 +18,15 @@ const TABS = [
   { key: 'action', label: '出入庫', icon: '📦', managerOnly: false },
   { key: 'wo', label: '工單管理', icon: '📋', managerOnly: false },
   { key: 'ship', label: '出庫出貨', icon: '🚢', managerOnly: false },
+  { key: 'book', label: '款式圖鑑', icon: '🧢', managerOnly: false },
   { key: 'report', label: '營運報表', icon: '📊', managerOnly: true },
   { key: 'settings', label: '設定', icon: '⚙️', managerOnly: false },
 ];
+
+/** 🌍 訪客展示路由：網址 #/lookbook → 純展示圖鑑（無登入、無內部按鈕） */
+function isLookbookRoute() {
+  return (window.location.hash || '').split('?')[0] === '#/lookbook';
+}
 
 export default function App() {
   const inventory = useInventory();
@@ -26,6 +34,14 @@ export default function App() {
   const [tab, setTab] = useState('search');
   const [query, setQuery] = useState(''); // 查詢頁搜尋字
   const [toast, setToast] = useState(null); // { type: 'success'|'error', msg }
+
+  // 🌍 訪客展示模式：#/lookbook 路由（跟隨 hash 變化，可分享後返回）
+  const [guestRoute, setGuestRoute] = useState(isLookbookRoute);
+  useEffect(() => {
+    const onHash = () => setGuestRoute(isLookbookRoute());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
 
   // 掃碼狀態：scanFor 決定把掃到的品號帶到哪個分頁
   const [scanFor, setScanFor] = useState(null); // 'search' | 'action'
@@ -165,6 +181,16 @@ export default function App() {
     [workOrders, showToast],
   );
 
+  // 🌍 訪客展示路由：#/lookbook 只渲染純展示圖鑑（無登入／無分頁／無內部功能）
+  if (guestRoute) {
+    return (
+      <>
+        <LookbookPublic />
+        <Toast toast={toast} onDone={() => setToast(null)} />
+      </>
+    );
+  }
+
   return (
     <div className="flex h-full flex-col bg-slate-100">
       {/* ===== 頂部標題列 ===== */}
@@ -236,6 +262,13 @@ export default function App() {
             onItemsUpdated={inventory.applyItem}
             onOpenScanner={() => openScanner('ship')}
             goToSettings={() => setTab('settings')}
+          />
+        )}
+        {tab === 'book' && (
+          <LookbookTab
+            items={inventory.items}
+            onItemsUpdated={inventory.applyItem}
+            showToast={showToast}
           />
         )}
         {tab === 'report' && <AnalyticsTab showToast={showToast} />}

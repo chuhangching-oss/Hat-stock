@@ -29,7 +29,7 @@ export function compressImage(file, { maxDim = 1280, quality = 0.72 } = {}) {
   });
 }
 
-/** 上傳某品號的款式照片 → 回傳 { item_code, photo_url, file_id, item } */
+/** 上傳某品號的款式照片 → 回傳 { item_code, image_url, file_id, item } */
 export async function uploadItemPhoto(itemCode, file) {
   const data = await compressImage(file);
   return gasRequest(getGasUrl(), {

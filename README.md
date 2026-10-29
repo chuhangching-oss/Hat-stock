@@ -41,6 +41,9 @@ knit-factory-inventory/
         ├── SearchTab.jsx         # 分頁1：搜尋 + 掃碼 + 卡片清單（<=10 紅字警示）
         ├── ActionTab.jsx         # 分頁2：入庫/出庫/盤點 + 防呆 + 二次確認
         ├── AnalyticsTab.jsx      # 分頁5：營運報表（🔐 僅限 HC / MAIN）
+        ├── LookbookTab.jsx       # 分頁6：款式圖鑑（卡片/Lightbox/編輯/分享連結）
+        ├── LookbookPublic.jsx    # 訪客展示頁（#/lookbook 純展示，免登入）
+        ├── LookbookShared.jsx    # 圖鑑共用：grouping/篩選/HatImage 破圖 Placeholder
         ├── Scanner.jsx           # 全螢幕相機掃碼（含手動輸入備援）
         ├── ConfirmDialog.jsx     # 底部抽屜式確認彈窗
         └── Toast.jsx
@@ -95,10 +98,16 @@ npm run dev
 
 **INVENTORY_MASTER（庫存主檔）**
 
-| Item_Code | Item_Name | Category | Color_Spec | Stock_Qty | Unit | Location | Last_Updated |
-|---|---|---|---|---|---|---|---|
-| KN-CAP-001 | 針織毛線帽 M | 成品 | 燕麥色 | 120 | PCS | A-01-05 | 2026-… |
-| KN-YARN-007 | 壓克力毛紗 30# | 原料 | 本白 | 45.5 | KG | R-03 | 2026-… |
+| Item_Code | Item_Name | Category | Color_Spec | Stock_Qty | Unit | Location | Last_Updated | Image_URL | Style_Category | Season | Is_Public |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| KN-CAP-001 | 針織毛線帽 M | 成品 | 燕麥色 | 120 | PCS | A-01-05 | 2026-… | https://drive… | Beanie 毛帽 | AW | Y |
+| KN-YARN-007 | 壓克力毛紗 30# | 原料 | 本白 | 45.5 | KG | R-03 | 2026-… | | | | Y |
+
+第 9 欄之後為**數位圖鑑（Lookbook）欄位**（執行一次 `setupSheets()` 自動補欄）：
+`Image_URL`＝款式圖片連結（上傳照片或手動貼 Drive／外部 URL；舊名 Photo_URL）；
+`Style_Category`＝帽型分類（Fedora 紳士帽／Casquette 報童帽／Beret 貝雷帽／
+Cap／Boonie…）；`Season`＝SS（春夏）/AW（秋冬）/四季；`Is_Public`＝Y/N
+（空白視為 Y）。原 `Category` 欄維持 原料/半成品/成品 品類不變。
 
 **STOCK_LOG（出入庫異動記錄）**
 
@@ -171,6 +180,26 @@ SHIPMENT_ORDERS ＋ SHIPMENT_DETAILS（金額欄缺欄的舊資料自動以 0 �
 白名單寫在後端 `Code.gs` 的 `ALLOWED_MANAGERS` 與前端 `src/api.js` 的
 `ALLOWED_MANAGERS`（兩處需同步），日後要開放第三位管理者的話兩邊各加一個代碼即可。
 身分判定：以「設定」分頁填寫的經辦人為準。
+
+#### 款式數位圖鑑（Lookbook / B2B Catalog）
+
+「🧢 款式圖鑑」分頁以**款式（品名）為單位**做卡片式視覺瀏覽（同款多色歸同一張卡）：
+帽型分類標籤＋季節標籤（SS/AW/四季）＋款號/顏色關鍵字篩選；卡片含款式照片
+（破圖自動顯示灰階帽子 Placeholder）＋`[Fedora] [SS]` 等徽章＋顏色清單；
+點卡片開啟 **Lightbox 放大檢視**（內部版另附品號×庫存明細）。
+
+- **✏️ 編輯圖鑑資訊**：Lightbox 內可直接改該款的帽型分類／季節／Image_URL／
+  是否對外公開（存整款＝同步全部顏色品號，走 `update_item_info`）。
+  也可以照舊用 🖼️ 按鈕拍照上傳（自動寫入 Image_URL）。
+- **🔗 客戶分享連結**：右上角按鈕產生 `<App網址>#/lookbook?api=…` 連結，
+  LINE／EMAIL 直接傳給客人。
+
+**🌍 訪客展示頁（#​/lookbook）**：開啟連結即為純展示模式——無需登入／存取碼、
+無內部操作按鈕與庫存數字，可篩選帽型/季節、搜尋款號、點卡片放大；
+資料來源為 `GET ?action=public_lookbook`（**免存取碼，後端已安全過濾**：
+只回 `Is_Public=Y` 款式的款號／品名／帽型／季節／顏色清單／圖片 URL，
+**不含庫存量、儲位、更新時間等任何內部欄位**）。要暫時下架某款式，
+把該款所有品號的 `Is_Public` 改 **N** 即可。
 
 **CUSTOMERS（客戶清單）**
 
@@ -245,13 +274,17 @@ POST { action:"batchStockTransaction",           （或 batch_stock_transaction�
        主檔兩欄 setValues 一次寫回、STOCK_LOG 批次附加；
        出庫且有填 customer → 同時建立出貨單
 POST { action:"list_shipments" }                           → 出貨單主表（匯出 Invoice/Packing List 用）
-POST { action:"getSalesReport",                            （或 get_sales_report）
-       operator, period?:"ALL"|"YEAR"|"MONTH" }            → 營運統計報表
+POST { action:"getSalesReport", operator, period?:"ALL"|"YEAR"|"MONTH" } → 營運統計報表
        🔐 僅限管理者 HC / MAIN（不分大小寫、容許 01-HC 等名冊格式）：
        其他身分直接拋「權限不足…」（ok:false，等同 403），
        不回傳任何營業額／客戶金額／款式銷量。
        回傳：總營收/訂單/件數/客戶數/箱數/淨毛重 + 客戶業績排行 + 款式銷量排行，
        統計源 SHIPMENT_ORDERS/DETAILS，以出貨日過濾期間（ALL=全部）
+POST { action:"update_item_info", item_code, image_url?,
+       style_category?, season?, is_public? }               → 更新品項圖鑑資訊（缺的欄不動）
+GET  { action:"public_lookbook" }                          → 🌍 數位圖鑑（免存取碼）
+       僅回 Is_Public≠'N' 款式；已過濾庫存/內部欄位，只回
+       style_no/品名/帽型分類/季節/colors[]/Image_URL（以款式 grouping）
 回應固定為 { ok:true, data:… } 或 { ok:false, error:"…" }
 ```
 

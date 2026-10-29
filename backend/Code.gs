@@ -69,6 +69,13 @@
  *         前端一律以錯誤處理，絕不回傳任何營業額或匯總資料）
  *       彙總來源：SHIPMENT_ORDERS（客戶/金額/箱重）＋ SHIPMENT_DETAILS（款式排行）
  *
+ *   { action: "update_item_info", item_code,
+ *     image_url?, style_category?, season?,      → 更新品項圖鑑資訊（缺的欄不動）
+ *     is_public? }                                 回傳 { item }
+ *   { action: "public_lookbook" }                  → 🌍 數位圖鑑（免存取碼，GET/POST 皆可）
+ *       僅 Is_Public≠'N' 款式；已過濾庫存/內部欄位，只回
+ *       style_no/品名/帽型分類/季節/顏色清單/Image_URL（以款式 grouping）
+ *
  * ---- 批次出入庫（購物車模式，一次多筆品項） ----
  *   { action: "batchStockTransaction" (或 batch_stock_transaction),
  *     type: "IN" | "OUT" | "入庫" | "出庫" | "盤點",
@@ -91,7 +98,11 @@ var SHEET_OPS = 'OPERATORS';           // 經辦人名冊（序號 + 姓名）
 var MASTER_HEADERS = [
   'Item_Code', 'Item_Name', 'Category', 'Color_Spec',
   'Stock_Qty', 'Unit', 'Location', 'Last_Updated',
-  'Photo_URL', // 第 9 欄（選填）：款式照片連結（存於 Google Drive）
+  'Image_URL', // 第 9 欄（選填）：款式圖片連結＝舊稱 Photo_URL（存於 Google Drive 或外部 URL）
+  // ---- 數位圖鑑（Lookbook）欄位 ----
+  'Style_Category', // 第 10 欄（選填）：帽型分類（Fedora 紳士帽 / Casquette 報童帽 / Beret 貝雷帽 / Cap / Boonie…）
+  'Season',         // 第 11 欄（選填）：SS（春夏）/ AW（秋冬）/ 四季款
+  'Is_Public',      // 第 12 欄（選填）：圖鑑對外公開 Y / N（留空＝Y）
 ];
 var LOG_HEADERS = [
   'Log_ID', 'Timestamp', 'Type', 'Item_Code',
@@ -209,6 +220,12 @@ function doPost(e) {
       case 'batch_stock_transaction':
         data = batchStockTransaction_(req);
         break;
+      case 'update_item_info':
+        data = updateItemInfo_(req);
+        break;
+      case 'public_lookbook':
+        data = getPublicLookbook_();
+        break;
       default:
         throw new Error('未知的 action：' + req.action + '（可用：ping / list / get / log / upload_photo）');
     }
@@ -222,6 +239,11 @@ function doGet(e) {
   var params = (e && e.parameter) || {};
   var action = String(params.action || '');
   try {
+    // 🌍 公開圖鑑：資料已過濾商業機密（無庫存／成本欄位），不需存取碼，
+    //    供「客戶分享連結 #/lookbook?api=…」直接撈取
+    if (action === 'public_lookbook') {
+      return makeResponse_({ ok: true, data: getPublicLookbook_() });
+    }
     checkToken_(params);
     if (action === 'ping') return makeResponse_({ ok: true, data: ping_() });
     if (action === 'list') return makeResponse_({ ok: true, data: listMaster_() });
@@ -583,12 +605,12 @@ function uploadPhoto_(req) {
     // img 標籤直接可顯示的縮圖網址
     var url = 'https://drive.google.com/thumbnail?id=' + file.getId() + '&sz=w1200';
 
-    ensureSheet_(SHEET_MASTER);          // 補上 Photo_URL 標題（舊表）
-    master.getRange(row, 9).setValue(url); // 第 9 欄 = Photo_URL
+    ensureSheet_(SHEET_MASTER);          // 補上 Image_URL 等標題（舊表）
+    master.getRange(row, 9).setValue(url); // 第 9 欄 = Image_URL（款式圖片）
 
     return {
       item_code: code,
-      photo_url: url,
+      image_url: url,
       file_id: file.getId(),
       item: rowToItem_(master.getRange(row, 1, 1, MASTER_HEADERS.length).getValues()[0]),
     };
@@ -607,6 +629,87 @@ function getPhotoFolder_() {
     if (f.getName() === name) return f;
   }
   return DriveApp.createFolder(name);
+}
+
+/* ============================================================
+ * 數位圖鑑（Lookbook / B2B Catalog）
+ * ============================================================ */
+
+/**
+ * 更新品項的圖鑑資訊（圖片 URL／帽型分類／季節／是否公開）
+ * req = { item_code, image_url?, style_category?, season?, is_public? }
+ * （有傳欄位才更新，缺的欄不動；回傳更新後完整 item）
+ */
+function updateItemInfo_(req) {
+  var code = String(req.item_code || '').trim();
+  if (!code) throw new Error('缺少品號 Item_Code');
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var master = getSheet_(SHEET_MASTER);
+    ensureSheet_(SHEET_MASTER); // 舊表補上圖鑑欄位
+    var row = findMasterRow_(master, code);
+    if (row === -1) throw new Error('品號不存在於 INVENTORY_MASTER：' + code);
+
+    if (req.image_url !== undefined) {
+      master.getRange(row, 9).setValue(String(req.image_url || '').trim());
+    }
+    if (req.style_category !== undefined) {
+      master.getRange(row, 10).setValue(String(req.style_category || '').trim());
+    }
+    if (req.season !== undefined) {
+      master.getRange(row, 11).setValue(String(req.season || '').trim());
+    }
+    if (req.is_public !== undefined) {
+      master.getRange(row, 12).setValue(
+        String(req.is_public || '').trim().toUpperCase() === 'N' ? 'N' : 'Y',
+      );
+    }
+    return { item: rowToItem_(master.getRange(row, 1, 1, MASTER_HEADERS.length).getValues()[0]) };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
+}
+
+/**
+ * 🌍 公開數位圖鑑（B2B 客戶挑款式用，不需存取碼）：
+ * - 僅撈取 Is_Public ≠ 'N' 的款式（留空或 Y = 公開）
+ * - 安全過濾：回傳只有款式資料本身——
+ *   { style_no, style_name, style_category, season, category, image_url,
+ *     colors: [顏色規格…] }
+ *   絕不包含庫存量、位置、更新時間等內部欄位
+ * - 以款式（Item_Name）為單位 grouping：同款所有顏色歸到同一張卡片
+ */
+function getPublicLookbook_() {
+  var items = listMaster_();
+  var map = {};
+  var order = [];
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    if (String(it.is_public || 'Y').toUpperCase() === 'N') continue; // 業主不想公開的款式
+    var key = it.item_name;
+    var g = map[key];
+    if (!g) {
+      g = map[key] = {
+        style_no: it.item_name,
+        style_name: it.item_name,
+        style_category: it.style_category || '',
+        season: it.season || '',
+        category: it.category,
+        image_url: '',
+        colors: [],
+      };
+      order.push(key);
+    }
+    if (!g.image_url && it.image_url) g.image_url = it.image_url;
+    if (!g.style_category && it.style_category) g.style_category = it.style_category;
+    if (!g.season && it.season) g.season = it.season;
+    if (it.color_spec && g.colors.indexOf(it.color_spec) === -1) g.colors.push(it.color_spec);
+  }
+  order.sort(function (a, b) { return a.localeCompare(b); });
+  var rows = [];
+  for (var k = 0; k < order.length; k++) rows.push(map[order[k]]);
+  return rows;
 }
 
 /* ============================================================
@@ -1422,7 +1525,7 @@ function createMasterRow_(master, newItem, codeHint) {
   } else if (findMasterRow_(master, code) !== -1) {
     throw new Error('品號已存在，不可重複建立：' + code);
   }
-  ensureSheet_(SHEET_MASTER); // 舊表補上 Photo_URL 等標題（不影響既有資料）
+  ensureSheet_(SHEET_MASTER); // 舊表補上 Image_URL / Style_Category / Season / Is_Public 等標題（不影響既有資料）
   master.appendRow([
     code,
     name,
@@ -1432,7 +1535,10 @@ function createMasterRow_(master, newItem, codeHint) {
     String(newItem.unit || '').trim() || 'PCS',
     String(newItem.location || '').trim(),
     now_(),
-    '', // Photo_URL
+    String(newItem.image_url || '').trim(), // 圖片 URL（可留空，之後上傳／填入）
+    String(newItem.style_category || '').trim(), // 帽型分類（選填）
+    String(newItem.season || '').trim(),         // SS / AW / 四季（選填）
+    String(newItem.is_public || 'Y').trim(),     // 預設公開
   ]);
   return master.getLastRow();
 }
@@ -1464,7 +1570,10 @@ function rowToItem_(row) {
     unit: String(row[5]) || 'PCS',
     location: String(row[6]),
     last_updated: String(row[7]),
-    photo_url: row.length > 8 ? String(row[8]) : '', // 款式照片（未有資料則空字串）
+    image_url: row.length > 8 ? String(row[8]) : '', // 款式圖片（舊稱 photo_url）
+    style_category: row.length > 9 ? String(row[9]) : '', // 帽型分類（Fedora/Casquette/Beret/Cap/Boonie…）
+    season: row.length > 10 ? String(row[10]) : '',       // SS / AW / 四季
+    is_public: row.length > 11 ? (String(row[11]).trim().toUpperCase() || 'Y') : 'Y', // 空白視為 Y
   };
 }
 
