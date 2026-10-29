@@ -135,6 +135,36 @@ npm run dev
 `Due_Date` 已過期且狀態仍為「生產中」的自動轉為「**待確認**」，
 App 首頁會出現醒目的「⏰ 到期待確認工單」清單。
 
+**CUSTOMERS（客戶清單）**
+
+| Customer_ID | Customer_Name | Country |
+|---|---|---|
+| C001 | MOONBAT | JP |
+| C002 | KURIHARA | JP |
+
+`Customer_ID` 由 App 自動編號（C###）；客戶可在「出庫出貨」分頁的清單選取，
+或手動輸入並勾選「送出時存入客戶清單」。後端可另執行 `seedDemoCustomers()`
+灌入示範客戶（MOONBAT / KURIHARA / CANAL / APE）。
+
+**SHIPMENT_ORDERS（出貨單主表）**
+
+| Shipment_ID | Shipment_Date | Customer_Name | Total_Styles | Total_PCS | Status | Remark |
+|---|---|---|---|---|---|---|
+| SH20261029-01 | 2026-10-29 | MOONBAT | 2 | 330 | 已出庫 | PO#2026-888 |
+
+`Shipment_ID` 自動編號（SHyyyyMMdd-##，當日流水號）；`Total_Styles` 以不同品名
+（款式）計算，同款不同顏色各為一列明細但只算一種 Style。
+
+**SHIPMENT_DETAILS（出貨單明細）**
+
+| Shipment_ID | Item_Code | Style_No | Color_Spec | Qty | Unit |
+|---|---|---|---|---|---|
+| SH20261029-01 | A0001 | 1101PC/6624 | 黑色 | 200 | PCS |
+| SH20261029-01 | A0002 | 1101PC/6624 | 燕麥色 | 130 | PCS |
+
+每列 = 一個品號（款式 × 顏色）。這兩張表彙整齊全後，
+日後可直接據此匯出外銷用的 **Commercial Invoice / Packing List**（下一階段擴充）。
+
 ### API 協定（給日後擴充參考）
 
 ```
@@ -156,6 +186,14 @@ POST { action:"complete_work_order", wo_id, actual_qty,
        operator, remark? }                                 → 確認完工結案
        入倉庫 → 成品入庫＋BOM 扣料＋「已入庫」；訂單出貨 → 「待出貨」
 POST { action:"ship_work_order", wo_id }                   → 待出貨 → 已出貨
+POST { action:"list_customers" }                           → 客戶清單
+POST { action:"add_customer", customer_name, country? }    → 新增客戶（重複名稱擋下）
+POST { action:"create_shipment", shipment_date?,
+       customer_name, operator?, remark?,
+       lines:[{ item_code, qty }, …] }                     → 建立出貨單（SHyyyyMMdd-##）
+       任一品庫存不足 → 整張擋下（不寫入任何資料）；
+       成功後批次扣庫＋STOCK_LOG＋SHIPMENT_ORDERS/DETAILS
+POST { action:"list_shipments" }                           → 出貨單主表（匯出 Invoice/Packing List 用）
 回應固定為 { ok:true, data:… } 或 { ok:false, error:"…" }
 ```
 

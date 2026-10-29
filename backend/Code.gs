@@ -3,7 +3,7 @@
  * ---------------------------------------------------------------
  * 部署步驟（詳細圖文請見專案 README.md）：
  *   1. 在接到的 Google 試算表中：擴充功能 ➔ Apps Script ➔ 貼上本檔全部內容
- *   2. 先手動執行一次 setupSheets()（建立五張表、凍結標題列、允許授權、
+ *   2. 先手動執行一次 setupSheets()（建立八張表、凍結標題列、允許授權、
  *      安裝工作令到期檢查觸發器）
 
  *   3. 部署 ➔ 新增部署作業 ➔ 類型「網路應用程式」
@@ -45,6 +45,18 @@
  * 每日到期檢查：checkDueWorkOrders()（Time-driven 觸發，setupSheets 會自動安裝）
  *   Due_Date 已過期且狀態仍為「生產中」→ 自動改為「待確認」
  *
+ * ---- 出庫與出貨單（外銷出貨） ----
+ *   { action: "list_customers" }                    → 客戶清單 [{customer_id, customer_name, country}]
+ *   { action: "add_customer",
+ *     customer_name, country? }                     → 新增客戶（重複名稱擋下）
+ *   { action: "create_shipment",
+ *     shipment_date, customer_name, operator?,
+ *     remark?, lines: [{item_code, qty}] }          → 建立出貨單（單號 SHyyyyMMdd-##）
+ *       1. 批次扣減 INVENTORY_MASTER（任何一品庫存不足 → 整張擋下並回報）
+ *       2. 每一品項寫入 STOCK_LOG（出庫；備註含出貨單號＋客戶）
+ *       3. 寫入 SHIPMENT_ORDERS 主表 ＋ SHIPMENT_DETAILS 明細
+ *   { action: "list_shipments" }                    → 出貨單主表（日後匯出 Invoice / Packing List 用）
+ *
  * 回應：{ ok: true, data: ... } 或 { ok: false, error: "訊息" }
  **************************************************************************/
 
@@ -79,6 +91,14 @@ var WO_STATUS_CHECK = '待確認';
 var WO_STATUS_TOSHIP = '待出貨';
 var WO_STATUS_IN = '已入庫';
 var WO_STATUS_SHIPPED = '已出貨';
+
+var SHEET_CUST = 'CUSTOMERS';                // 客戶清單
+var SHEET_SHP = 'SHIPMENT_ORDERS';           // 出貨單主表
+var SHEET_SHPD = 'SHIPMENT_DETAILS';         // 出貨單明細
+var CUST_HEADERS = ['Customer_ID', 'Customer_Name', 'Country'];
+var SHP_HEADERS = ['Shipment_ID', 'Shipment_Date', 'Customer_Name', 'Total_Styles', 'Total_PCS', 'Status', 'Remark'];
+var SHPD_HEADERS = ['Shipment_ID', 'Item_Code', 'Style_No', 'Color_Spec', 'Qty', 'Unit'];
+var SHP_STATUS = '已出庫';
 
 var VALID_TYPES = ['入庫', '出庫', '盤點'];
 
@@ -132,6 +152,18 @@ function doPost(e) {
         break;
       case 'ship_work_order':
         data = shipWorkOrder_(req);
+        break;
+      case 'list_customers':
+        data = listCustomers_();
+        break;
+      case 'add_customer':
+        data = addCustomer_(req);
+        break;
+      case 'create_shipment':
+        data = createShipment_(req);
+        break;
+      case 'list_shipments':
+        data = listShipments_();
         break;
       default:
         throw new Error('未知的 action：' + req.action + '（可用：ping / list / get / log / upload_photo）');
@@ -619,6 +651,228 @@ function installDueCheckTrigger() {
   Logger.log('已安裝「工作令到期檢查」每日觸發器（約每日 06:00 執行）');
 }
 
+/* ============================================================
+ * 出庫與出貨單（CUSTOMERS / SHIPMENT_ORDERS / SHIPMENT_DETAILS）
+ * ============================================================ */
+
+/** 客戶清單（依名稱排序） */
+function listCustomers_() {
+  var sheet = getSheet_(SHEET_CUST);
+  var values = sheet.getDataRange().getValues();
+  var rows = [];
+  for (var i = 1; i < values.length; i++) {
+    var name = String(values[i][1]).trim();
+    if (!name) continue;
+    rows.push({
+      customer_id: String(values[i][0]).trim(),
+      customer_name: name,
+      country: String(values[i][2]).trim(),
+    });
+  }
+  rows.sort(function (a, b) { return a.customer_name.localeCompare(b.customer_name); });
+  return rows;
+}
+
+/** 依客戶名稱（不分大小寫）找列號；找不到回 -1 */
+function findCustomerRowByName_(name) {
+  var target = String(name || '').trim().toUpperCase();
+  if (!target) return -1;
+  var sheet = getSheet_(SHEET_CUST);
+  var last = sheet.getLastRow();
+  if (last < 2) return -1;
+  var values = sheet.getRange(2, 2, last - 1, 1).getValues(); // 第 2 欄 Customer_Name
+  for (var i = 0; i < values.length; i++) {
+    if (String(values[i][0]).trim().toUpperCase() === target) return i + 2;
+  }
+  return -1;
+}
+
+/** 手動新增客戶（Customer_ID 自動編號 C###；重複名稱擋下；Country 選填） */
+function addCustomer_(req) {
+  var name = String(req.customer_name || '').trim();
+  if (!name) throw new Error('缺少客戶名稱 Customer_Name');
+  var country = String(req.country || '').trim();
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    if (findCustomerRowByName_(name) !== -1) throw new Error('客戶已存在：' + name);
+    var sheet = getSheet_(SHEET_CUST);
+    var last = sheet.getLastRow();
+    var max = 0;
+    if (last >= 2) {
+      var ids = sheet.getRange(2, 1, last - 1, 1).getValues();
+      for (var i = 0; i < ids.length; i++) {
+        var m = String(ids[i][0]).trim().match(/^C(\d+)$/i);
+        if (m) max = Math.max(max, parseInt(m[1], 10));
+      }
+    }
+    var id = 'C' + ('000' + (max + 1)).slice(-3);
+    sheet.appendRow([id, name, country]);
+    return { customer: { customer_id: id, customer_name: name, country: country } };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
+}
+
+/**
+ * 建立出貨單（外銷出庫）：
+ * 1. 批次扣減 INVENTORY_MASTER（LockService 保護下先全數檢查，任一不足 → 整張擋下）
+ * 2. 每一品項寫入 STOCK_LOG（出庫；備註＝出貨 單號／客戶）
+ * 3. 寫入 SHIPMENT_ORDERS 主表 ＋ SHIPMENT_DETAILS 明細
+ * req = { shipment_date?(YYYY-MM-DD，預設今天), customer_name, operator?, remark?,
+ *         lines: [{ item_code, qty }, ...] }
+ * 回傳 { shipment_id, shipment_date, customer_name, total_styles, total_pcs, updated_items }
+ */
+function createShipment_(req) {
+  var shipDate = dueYMD_(String(req.shipment_date || '').trim() || now_());
+  if (!shipDate) throw new Error('Shipment_Date 格式需為 YYYY-MM-DD');
+  var customer = String(req.customer_name || '').trim();
+  if (!customer) throw new Error('缺少客戶名稱 Customer_Name');
+  var operator = String(req.operator || '').trim() || '—';
+  var remark = String(req.remark || '').trim();
+  var lines = Array.isArray(req.lines) ? req.lines : [];
+  if (lines.length === 0) throw new Error('出貨明細不可為空');
+
+  // 先整理明細（品號去重、數量檢查）
+  var details = [];
+  var seen = {};
+  for (var i = 0; i < lines.length; i++) {
+    var lCode = String(lines[i].item_code || '').trim().toUpperCase();
+    if (!lCode) throw new Error('明細缺少品號 Item_Code');
+    var lQty = Number(lines[i].qty);
+    if (isNaN(lQty) || lQty <= 0) throw new Error('明細數量必須大於 0：' + lCode);
+    if (seen[lCode]) throw new Error('明細中有重複品號：' + lCode + '（請合併為一列）');
+    seen[lCode] = true;
+    details.push({ code: lCode, qty: lQty });
+  }
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var master = getSheet_(SHEET_MASTER);
+
+    // 第一輪：解析品項並檢查所有庫存（任一不足不寫入任何資料）
+    var resolved = [];
+    for (var j = 0; j < details.length; j++) {
+      var row = findMasterRow_(master, details[j].code);
+      if (row === -1) throw new Error('品號不存在於 INVENTORY_MASTER：' + details[j].code);
+      var item = rowToItem_(master.getRange(row, 1, 1, MASTER_HEADERS.length).getValues()[0]);
+      var stock = Number(master.getRange(row, 5).getValue()) || 0;
+      if (details[j].qty > stock) {
+        throw new Error('庫存不足：' + item.item_code + ' ' + item.item_name +
+          (item.color_spec ? '（' + item.color_spec + '）' : '') +
+          '；在庫 ' + stock + '、欲出庫 ' + details[j].qty + '。請先補貨入庫');
+      }
+      resolved.push({ row: row, item: item, qty: details[j].qty });
+    }
+
+    // 第二輪：扣庫存＋記錄
+    var shipmentId = nextShipmentId_();
+    var updatedItems = [];
+    var styleNames = {};
+    var totalPcs = 0;
+    var detailRows = [];
+    var logSheet = getSheet_(SHEET_LOG);
+    for (var k = 0; k < resolved.length; k++) {
+      var r = resolved[k];
+      var cur = Number(master.getRange(r.row, 5).getValue()) || 0;
+      master.getRange(r.row, 5).setValue(cur - r.qty);
+      master.getRange(r.row, 8).setValue(now_()); // Last_Updated
+
+      var logId = 'L' + Utilities.formatDate(new Date(), nowTz_(), 'yyyyMMddHHmmss') +
+        ('000' + Math.floor(Math.random() * 1000)).slice(-3);
+      logSheet.appendRow([
+        logId, now_(), '出庫', r.item.item_code, -r.qty, operator,
+        '出貨 ' + shipmentId + ' ／ ' + customer + (remark ? '；' + remark : ''),
+      ]);
+
+      totalPcs += r.qty;
+      styleNames[r.item.item_name] = true;
+      detailRows.push([shipmentId, r.item.item_code, r.item.item_name, r.item.color_spec, r.qty, r.item.unit]);
+      updatedItems.push(r.item);
+    }
+
+    // 出貨單主表＋明細表
+    getSheet_(SHEET_SHP).appendRow([
+      shipmentId, shipDate, customer, Object.keys(styleNames).length, totalPcs, SHP_STATUS, remark,
+    ]);
+    var detSheet = getSheet_(SHEET_SHPD);
+    detSheet.getRange(detSheet.getLastRow() + 1, 1, detailRows.length, SHPD_HEADERS.length).setValues(detailRows);
+
+    return {
+      shipment_id: shipmentId,
+      shipment_date: shipDate,
+      customer_name: customer,
+      total_styles: Object.keys(styleNames).length,
+      total_pcs: totalPcs,
+      updated_items: updatedItems,
+    };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
+}
+
+/** 出貨單號自動編號：SHyyyyMMdd-##（當日流水號） */
+function nextShipmentId_() {
+  var today = Utilities.formatDate(new Date(), nowTz_(), 'yyyyMMdd');
+  var prefix = 'SH' + today + '-';
+  var sheet = getSheet_(SHEET_SHP);
+  var max = 0;
+  var last = sheet.getLastRow();
+  if (last >= 2) {
+    var ids = sheet.getRange(2, 1, last - 1, 1).getValues();
+    for (var i = 0; i < ids.length; i++) {
+      var s = String(ids[i][0]).trim();
+      if (s.indexOf(prefix) === 0) {
+        var n = parseInt(s.slice(prefix.length), 10);
+        if (!isNaN(n) && n > max) max = n;
+      }
+    }
+  }
+  return prefix + ('00' + (max + 1)).slice(-2);
+}
+
+/** 出貨單主表（由新到舊排序；日後匯出 Commercial Invoice / Packing List 用） */
+function listShipments_() {
+  var sheet = getSheet_(SHEET_SHP);
+  var values = sheet.getDataRange().getValues();
+  var rows = [];
+  for (var i = 1; i < values.length; i++) {
+    if (String(values[i][0]).trim() === '') continue;
+    rows.push({
+      shipment_id: String(values[i][0]).trim(),
+      shipment_date: dueYMD_(values[i][1]),
+      customer_name: String(values[i][2]).trim(),
+      total_styles: Number(values[i][3]) || 0,
+      total_pcs: Number(values[i][4]) || 0,
+      status: String(values[i][5]).trim(),
+      remark: String(values[i][6]).trim(),
+    });
+  }
+  rows.sort(function (a, b) { return String(b.shipment_id).localeCompare(String(a.shipment_id)); });
+  return rows;
+}
+
+/** 【選用】灌入示範客戶清單（Spec 中之外銷客戶），方便第一次測試 */
+function seedDemoCustomers() {
+  var demo = [
+    ['MOONBAT', 'JP'],
+    ['KURIHARA', 'JP'],
+    ['CANAL', 'US'],
+    ['APE', ''],
+  ];
+  var sheet = getSheet_(SHEET_CUST);
+  var last = sheet.getLastRow();
+  var next = 1;
+  for (var i = 0; i < demo.length; i++) {
+    if (findCustomerRowByName_(demo[i][0]) !== -1) continue;
+    sheet.appendRow(['C' + ('000' + next).slice(-3), demo[i][0], demo[i][1]]);
+    next++;
+  }
+  Logger.log('示範客戶完成：%s 筆', demo.length);
+}
+
 /* ========================= Helpers ========================= */
 
 /** 🔐 存取碼檢查：API_TOKEN 非空時，req.token 必須一致 */
@@ -748,6 +1002,9 @@ function setupSheets() {
   Logger.log('建立 %s …', ensureSheet_(SHEET_OPS));
   Logger.log('建立 %s …', ensureSheet_(SHEET_WO));
   Logger.log('建立 %s …', ensureSheet_(SHEET_BOM));
+  Logger.log('建立 %s …', ensureSheet_(SHEET_CUST));
+  Logger.log('建立 %s …', ensureSheet_(SHEET_SHP));
+  Logger.log('建立 %s …', ensureSheet_(SHEET_SHPD));
   installDueCheckTrigger();
   Logger.log('完成！接著執行 seedDemoData() 可灌入示範料件（現有資料不會被覆蓋）');
 }
@@ -759,6 +1016,9 @@ function ensureSheet_(name) {
               : (name === SHEET_OPS) ? OPS_HEADERS
               : (name === SHEET_WO) ? WO_HEADERS
               : (name === SHEET_BOM) ? BOM_HEADERS
+              : (name === SHEET_CUST) ? CUST_HEADERS
+              : (name === SHEET_SHP) ? SHP_HEADERS
+              : (name === SHEET_SHPD) ? SHPD_HEADERS
               : LOG_HEADERS;
   if (!sheet) {
     // 全新建表：一次寫入所有標題

@@ -4,6 +4,7 @@ import useWorkOrders from './hooks/useWorkOrders';
 import SearchTab from './components/SearchTab';
 import ActionTab from './components/ActionTab';
 import WorkOrderTab from './components/WorkOrderTab';
+import ShipmentTab from './components/ShipmentTab';
 import SettingsTab from './components/SettingsTab';
 import Scanner from './components/Scanner';
 import Toast from './components/Toast';
@@ -11,6 +12,7 @@ const TABS = [
   { key: 'search', label: '庫存查詢', icon: '🔍' },
   { key: 'action', label: '出入庫', icon: '📦' },
   { key: 'wo', label: '工單管理', icon: '📋' },
+  { key: 'ship', label: '出庫出貨', icon: '🚢' },
   { key: 'settings', label: '設定', icon: '⚙️' },
 ];
 
@@ -39,6 +41,8 @@ export default function App() {
       setScanFor(null); // 關閉相機
       if (scanFor === 'search') setTab('search');
       if (scanFor === 'action') setTab('action');
+      if (scanFor === 'wo') setTab('wo');
+      if (scanFor === 'ship') setTab('ship');
       showToast(`已掃描：${code}`);
     },
     [scanFor, showToast],
@@ -196,6 +200,16 @@ export default function App() {
             goToSettings={() => setTab('settings')}
           />
         )}
+        {tab === 'ship' && (
+          <ShipmentTab
+            items={inventory.items}
+            scanResult={scanFor === 'ship' ? scanResult : null}
+            showToast={showToast}
+            onItemsUpdated={inventory.applyItem}
+            onOpenScanner={() => openScanner('ship')}
+            goToSettings={() => setTab('settings')}
+          />
+        )}
         {tab === 'settings' && (
           <SettingsTab
             showToast={showToast}
@@ -211,7 +225,7 @@ export default function App() {
             <button
               key={t.key}
               onClick={() => setTab(t.key)}
-              className={`flex min-h-touch w-1/4 flex-col items-center justify-center py-2 text-xs font-bold transition ${
+              className={`flex min-h-touch w-1/5 flex-col items-center justify-center py-2 text-xs font-bold transition ${
                 tab === t.key ? 'text-blue-700' : 'text-slate-400'
               }`}
             >
@@ -229,7 +243,7 @@ export default function App() {
           open
           onClose={closeScanner}
           onResult={handleScanResult}
-          title={scanFor === 'search' ? '掃碼查庫存' : '掃碼填入品號'}
+          title={scanFor === 'search' ? '掃碼查庫存' : scanFor === 'ship' ? '掃碼加入出貨明細' : '掃碼填入品號'}
         />
       )}
 
