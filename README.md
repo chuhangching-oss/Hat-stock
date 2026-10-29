@@ -125,6 +125,17 @@ npm run dev
 `Unit_Use` = 每件耗用量。開立工作令時自動試算 `需求量 = Plan_Qty × Unit_Use`；
 完工時可勾選「依 BOM 扣原料」（扣至負庫存也會照扣，供現場檢討）。
 
+#### 批次填報（購物車模式）
+
+「📦 出入庫」分頁改為批次填報：**單頭**（入庫／出庫／盤點切換、經辦人、
+出庫時可選客戶＋箱號備註）→ **連續加入區**（清單搜尋／📷 掃碼帶出料件後輸入數量，
+按【＋ 加入清單】即自動清空並重新打開選取清單，可連續掃下一筆）→
+**暫存清單＋即時統計**（sticky 顯示總品項／總款數／總件數；出庫任一列超過在庫
+紅字並阻擋送出）→【一鍵確認送出（共 M 件）】。一次 API 完成全部扣／加庫存與記錄。
+「🚢 出庫出貨」分頁同為批次模式，另外支援 Invoice No、船名航次、起運/目的港、
+貿易條件/幣別，以及每列的箱號／單價（USD）／淨重／毛重，統計列含
+總箱數／總金額／總淨毛重。
+
 新增料件可直接在 App「出入庫」分頁按「➕ 直接入庫新品項」（品號留空會自動編號 A####），
 或直接在 INVENTORY_MASTER 插入列填入（Last_Updated 系統會自動維護）；
 `Type` 支援：**入庫**（+數量）、**出庫**（−數量）、**盤點**（設定為盤點後實際庫存量）。
@@ -148,22 +159,25 @@ App 首頁會出現醒目的「⏰ 到期待確認工單」清單。
 
 **SHIPMENT_ORDERS（出貨單主表）**
 
-| Shipment_ID | Shipment_Date | Customer_Name | Total_Styles | Total_PCS | Status | Remark |
-|---|---|---|---|---|---|---|
-| SH20261029-01 | 2026-10-29 | MOONBAT | 2 | 330 | 已出庫 | PO#2026-888 |
+| Shipment_ID | Shipment_Date | Customer_Name | Total_Styles | Total_PCS | Status | Remark | Invoice_No | Carrier | Port_From | Port_To | Incoterm | Currency | Total_Cartons | Total_Amount | Total_NW | Total_GW |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| SH20261029-01 | 2026-10-29 | MOONBAT | 2 | 330 | 已出庫 | PO#2026-888 | GS-20261029 | YM INCEPTION | KEELUNG | YOKOHAMA | FOB TAIWAN | USD | 14 | 4,290 | 480 | 505 |
 
-`Shipment_ID` 自動編號（SHyyyyMMdd-##，當日流水號）；`Total_Styles` 以不同品名
-（款式）計算，同款不同顏色各為一列明細但只算一種 Style。
+`Shipment_ID` 自動編號（SHyyyyMMdd-##，當日流水號）；`Invoice_No` 留空時自動
+`GS-yyyyMMdd`；`Total_Styles` 以不同品名（款式）計算，同款不同顏色各為一列明細
+但只算一種 Style；`Total_Cartons` 依明細箱號去重統計。
+「出入庫」分頁的出庫若填了客戶，也會在此建立一張簡易出貨單（外銷欄位留空）。
+舊表執行一次 `setupSheets()` 會自動補上右側新欄位（Invoice/Carrier/港口/重量…）。
 
 **SHIPMENT_DETAILS（出貨單明細）**
 
-| Shipment_ID | Item_Code | Style_No | Color_Spec | Qty | Unit |
-|---|---|---|---|---|---|
-| SH20261029-01 | A0001 | 1101PC/6624 | 黑色 | 200 | PCS |
-| SH20261029-01 | A0002 | 1101PC/6624 | 燕麥色 | 130 | PCS |
+| Shipment_ID | Item_Code | Style_No | Color_Spec | Qty | Unit | Carton_No | Unit_Price | N_W | G_W | Amount |
+|---|---|---|---|---|---|---|---|---|---|---|
+| SH20261029-01 | A0001 | 1101PC/6624 | 黑色 | 200 | PCS | CTN #15-22 | 0.9 | 120 | 126 | 180 |
 
-每列 = 一個品號（款式 × 顏色）。這兩張表彙整齊全後，
-日後可直接據此匯出外銷用的 **Commercial Invoice / Packing List**（下一階段擴充）。
+每列 = 一個「品號 × 箱號」明細（同一品號分裝多箱可有多列，庫存檢查依品號合計）；
+欄位結構可直接對應外銷 **Commercial Invoice / Packing List** 的
+DATA_ENTRY 格式，日後一鍵輸出標準 A4 報關單據。
 
 ### API 協定（給日後擴充參考）
 
@@ -188,11 +202,22 @@ POST { action:"complete_work_order", wo_id, actual_qty,
 POST { action:"ship_work_order", wo_id }                   → 待出貨 → 已出貨
 POST { action:"list_customers" }                           → 客戶清單
 POST { action:"add_customer", customer_name, country? }    → 新增客戶（重複名稱擋下）
-POST { action:"create_shipment", shipment_date?,
-       customer_name, operator?, remark?,
-       lines:[{ item_code, qty }, …] }                     → 建立出貨單（SHyyyyMMdd-##）
-       任一品庫存不足 → 整張擋下（不寫入任何資料）；
-       成功後批次扣庫＋STOCK_LOG＋SHIPMENT_ORDERS/DETAILS
+POST { action:"create_shipment", shipment_date?, invoice_no?,
+       customer_name, operator?, remark?, carrier?, port_from?,
+       port_to?, incoterm?, currency?,
+       lines:[{ item_code, qty, carton_no?, unit_price?,
+                n_w?, g_w? }, …] }                     → 建立出貨單（SHyyyyMMdd-##）
+       同一品號可分列多箱（合計檢查庫存）；
+       任一品合計不足 → 整張擋下（不寫入任何資料）；
+       成功後批次扣庫＋STOCK_LOG＋SHIPMENT_ORDERS/DETAILS（外銷欄位全寫入）
+POST { action:"batchStockTransaction",           （或 batch_stock_transaction）
+       type:"IN"|"OUT"|"盤點", customer?, operator?,
+       remark?, force?, items:[{ item_code?, qty,
+       new_item? }, …] }                               → 批次出入庫（購物車模式）
+       盤點：qty＝盤後庫存量；出庫：任一不足整批擋下（force 才允許負庫存）
+       入庫可混入 new_item 直接建主檔；
+       主檔兩欄 setValues 一次寫回、STOCK_LOG 批次附加；
+       出庫且有填 customer → 同時建立出貨單
 POST { action:"list_shipments" }                           → 出貨單主表（匯出 Invoice/Packing List 用）
 回應固定為 { ok:true, data:… } 或 { ok:false, error:"…" }
 ```

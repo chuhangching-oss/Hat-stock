@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import useInventory from './hooks/useInventory';
 import useWorkOrders from './hooks/useWorkOrders';
+import { gasRequest, getGasUrl } from './api';
 import SearchTab from './components/SearchTab';
 import ActionTab from './components/ActionTab';
 import WorkOrderTab from './components/WorkOrderTab';
@@ -62,7 +63,7 @@ export default function App() {
     workOrders.refresh();
   }, [inventory, workOrders]);
 
-  // 出入庫送出（ActionTab 呼叫）
+  // 出入庫單筆送出（ActionTab「直接入庫新品項」呼叫）
   const handleSubmitLog = useCallback(
     async (payload) => {
       try {
@@ -78,6 +79,29 @@ export default function App() {
       } catch (e) {
         showToast(`❌ 送出失敗：${e.message}`, 'error');
         throw e; // 拋回讓 ActionTab 保持彈窗、顯示錯誤
+      }
+    },
+    [inventory, showToast],
+  );
+
+  // 批次出入庫送出（ActionTab 購物車模式呼叫）
+  const handleBatchSubmit = useCallback(
+    async (payload) => {
+      try {
+        const res = await gasRequest(getGasUrl(), {
+          action: 'batchStockTransaction',
+          ...payload,
+        });
+        (res.updated_items || []).forEach((it) => inventory.applyItem(it));
+        const shipPart = res.shipment_id ? `，已建立出貨單 ${res.shipment_id}` : '';
+        showToast(
+          `${payload.type === '出庫' ? '📤' : payload.type === '盤點' ? '🧮' : '📥'} 批次${res.type}成功：` +
+            `${res.total_items} 項 ${res.total_qty} 件${shipPart}`,
+        );
+        return res;
+      } catch (e) {
+        showToast(`❌ 批次送出失敗：${e.message}`, 'error');
+        throw e; // 拋回讓 ActionTab 保持彈窗
       }
     },
     [inventory, showToast],
@@ -179,6 +203,7 @@ export default function App() {
           <ActionTab
             items={inventory.items}
             onSubmit={handleSubmitLog}
+            onBatchSubmit={handleBatchSubmit}
             onOpenScanner={() => openScanner('action')}
             scanResult={scanFor === null ? scanResult : null} // 掃碼結束才套用，避免重複觸發
             showToast={showToast}
