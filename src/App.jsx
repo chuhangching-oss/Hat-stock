@@ -1,18 +1,22 @@
 import { useCallback, useEffect, useState } from 'react';
 import useInventory from './hooks/useInventory';
+import useWorkOrders from './hooks/useWorkOrders';
 import SearchTab from './components/SearchTab';
 import ActionTab from './components/ActionTab';
+import WorkOrderTab from './components/WorkOrderTab';
 import SettingsTab from './components/SettingsTab';
 import Scanner from './components/Scanner';
 import Toast from './components/Toast';
 const TABS = [
   { key: 'search', label: '庫存查詢', icon: '🔍' },
   { key: 'action', label: '出入庫', icon: '📦' },
+  { key: 'wo', label: '工單管理', icon: '📋' },
   { key: 'settings', label: '設定', icon: '⚙️' },
 ];
 
 export default function App() {
   const inventory = useInventory();
+  const workOrders = useWorkOrders();
   const [tab, setTab] = useState('search');
   const [query, setQuery] = useState(''); // 查詢頁搜尋字
   const [toast, setToast] = useState(null); // { type: 'success'|'error', msg }
@@ -48,6 +52,12 @@ export default function App() {
     [inventory],
   );
 
+  // 頂部「同步」按鈕：庫存主檔＋工作令一起重拉
+  const handleSync = useCallback(() => {
+    inventory.refresh();
+    workOrders.refresh();
+  }, [inventory, workOrders]);
+
   // 出入庫送出（ActionTab 呼叫）
   const handleSubmitLog = useCallback(
     async (payload) => {
@@ -69,6 +79,61 @@ export default function App() {
     [inventory, showToast],
   );
 
+  // ===== 工作令（WorkOrderTab 呼叫） =====
+  const handleCreateWO = useCallback(
+    async (payload) => {
+      try {
+        const res = await workOrders.createWO(payload);
+        const w = res.wo;
+        showToast(`✅ 工作令已開立：${w.wo_id}（${w.style_no} × ${w.plan_qty}${w.due_date ? `，到期 ${w.due_date}` : ''}）`);
+        return res;
+      } catch (e) {
+        showToast(`❌ 開立失敗：${e.message}`, 'error');
+        throw e;
+      }
+    },
+    [workOrders, showToast],
+  );
+
+  const handleCompleteWO = useCallback(
+    async (payload) => {
+      try {
+        const res = await workOrders.completeWO(payload);
+        // 完工會動到的料件（成品＋BOM 原料）即時更新本地庫存畫面
+        (res.updated_items || []).forEach((it) => inventory.applyItem(it));
+        const w = res.wo;
+        if (w.destination === '入倉庫') {
+          showToast(
+            `✅ 已完工入庫：${w.wo_id} → ${w.style_no} ×${w.actual_qty}${
+              res.bom_used > 0 ? `，並扣 ${res.bom_used} 種原料` : ''
+            }`,
+          );
+        } else {
+          showToast(`✅ 已完工：${w.wo_id} → 待出貨（${w.style_no} ×${w.actual_qty}）`);
+        }
+        return res;
+      } catch (e) {
+        showToast(`❌ 完工失敗：${e.message}`, 'error');
+        throw e;
+      }
+    },
+    [workOrders, inventory, showToast],
+  );
+
+  const handleShipWO = useCallback(
+    async (woId) => {
+      try {
+        const res = await workOrders.shipWO(woId);
+        showToast(`📦 已登記出貨：${res.wo.wo_id}（${res.wo.style_no}）`);
+        return res;
+      } catch (e) {
+        showToast(`❌ 登記失敗：${e.message}`, 'error');
+        throw e;
+      }
+    },
+    [workOrders, showToast],
+  );
+
   return (
     <div className="flex h-full flex-col bg-slate-100">
       {/* ===== 頂部標題列 ===== */}
@@ -76,10 +141,10 @@ export default function App() {
         <div className="flex items-center justify-between">
           <h1 className="text-xl font-extrabold tracking-wide">🧶 帽廠庫存管家</h1>
           <button
-            onClick={() => inventory.refresh()}
+            onClick={handleSync}
             className="min-h-touch flex items-center gap-1 rounded-xl bg-white/10 px-3 text-sm font-bold text-white transition active:bg-white/20"
           >
-            <span className={inventory.loading ? 'animate-spin' : ''}>⟳</span> 同步
+            <span className={inventory.loading || workOrders.loading ? 'animate-spin' : ''}>⟳</span> 同步
           </button>
         </div>
         <p className="mt-1 text-xs text-blue-200">
@@ -98,6 +163,8 @@ export default function App() {
             error={inventory.error}
             query={query}
             setQuery={setQuery}
+            dueWos={workOrders.dueWos}
+            goToWorkOrders={() => setTab('wo')}
             onOpenScanner={() => openScanner('search')}
             goToSettings={() => setTab('settings')}
             onPhotoUploaded={handlePhotoUploaded}
@@ -112,6 +179,21 @@ export default function App() {
             scanResult={scanFor === null ? scanResult : null} // 掃碼結束才套用，避免重複觸發
             showToast={showToast}
             onPhotoUploaded={handlePhotoUploaded}
+          />
+        )}
+        {tab === 'wo' && (
+          <WorkOrderTab
+            wos={workOrders.wos}
+            items={inventory.items}
+            loading={workOrders.loading}
+            error={workOrders.error}
+            showToast={showToast}
+            onCreateWO={handleCreateWO}
+            onCompleteWO={handleCompleteWO}
+            onShipWO={handleShipWO}
+            bomFor={workOrders.bomFor}
+            onRefresh={workOrders.refresh}
+            goToSettings={() => setTab('settings')}
           />
         )}
         {tab === 'settings' && (
@@ -129,7 +211,7 @@ export default function App() {
             <button
               key={t.key}
               onClick={() => setTab(t.key)}
-              className={`flex min-h-touch w-1/3 flex-col items-center justify-center py-2 text-xs font-bold transition ${
+              className={`flex min-h-touch w-1/4 flex-col items-center justify-center py-2 text-xs font-bold transition ${
                 tab === t.key ? 'text-blue-700' : 'text-slate-400'
               }`}
             >

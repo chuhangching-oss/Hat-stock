@@ -106,9 +106,34 @@ npm run dev
 |---|---|---|---|---|---|---|
 | L20261027… | 2026-… | 出庫 | KN-CAP-001 | -12 | 陳大明 | WO-2026-1130-A |
 
+**WORK_ORDERS（工作令／工單）**
+
+| WO_ID | Style_No | Plan_Qty | Due_Date | Destination | Order_Ref | Status | Actual_Qty | Completed_Time |
+|---|---|---|---|---|---|---|---|---|
+| WO261029-01 | 111AG20/6090R-G-D | 500 | 2026-11-05 | 入倉庫 | PO-2026-0888 | 生產中 | | |
+
+`Destination`：**入倉庫**（完工入庫存）／**訂單出貨**（完工後待出貨）；
+`Status`：**生產中 → 待確認 →（完工）已入庫 / 待出貨 →（出貨）已出貨**；
+`WO_ID` 由 App 自動編號（WOyyMMdd-##）。
+
+**BOM_MASTER（物料清單）**：一列 = 一款 × 一種原料
+
+| Style_No | Item_Code | Item_Name | Unit_Use |
+|---|---|---|---|
+| 111AG20/6090R-G-D | A0001 | 1101PC/6624 | 0.09 |
+
+`Unit_Use` = 每件耗用量。開立工作令時自動試算 `需求量 = Plan_Qty × Unit_Use`；
+完工時可勾選「依 BOM 扣原料」（扣至負庫存也會照扣，供現場檢討）。
+
 新增料件可直接在 App「出入庫」分頁按「➕ 直接入庫新品項」（品號留空會自動編號 A####），
 或直接在 INVENTORY_MASTER 插入列填入（Last_Updated 系統會自動維護）；
 `Type` 支援：**入庫**（+數量）、**出庫**（−數量）、**盤點**（設定為盤點後實際庫存量）。
+
+#### 工作令每日到期檢查（自動）
+
+`setupSheets()` 會安裝 Time-driven 觸發器（每日約 06:00 執行 `checkDueWorkOrders()`）：
+`Due_Date` 已過期且狀態仍為「生產中」的自動轉為「**待確認**」，
+App 首頁會出現醒目的「⏰ 到期待確認工單」清單。
 
 ### API 協定（給日後擴充參考）
 
@@ -122,6 +147,15 @@ POST { action:"log",  type:"入庫", item_code, qty, …,
        new_item:{ item_code?, item_name, category?,
                   color_spec?, unit?, location? } }       → 品號不存在時
        先建立新品項（item_code 留空 → 自動編號 A####）再入庫
+POST { action:"list_work_orders" }                         → 整份工作令
+POST { action:"list_bom" }                                 → 整份 BOM
+POST { action:"create_work_order", style_no, plan_qty,
+       due_date, destination, order_ref? }                 → 開立工作令（生產中）
+POST { action:"complete_work_order", wo_id, actual_qty,
+       target_item_code(入倉庫必填), use_bom,
+       operator, remark? }                                 → 確認完工結案
+       入倉庫 → 成品入庫＋BOM 扣料＋「已入庫」；訂單出貨 → 「待出貨」
+POST { action:"ship_work_order", wo_id }                   → 待出貨 → 已出貨
 回應固定為 { ok:true, data:… } 或 { ok:false, error:"…" }
 ```
 

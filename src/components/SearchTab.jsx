@@ -7,6 +7,12 @@ function isLowStock(item) {
   return Number(item.stock_qty) <= LOW_STOCK_THRESHOLD;
 }
 
+/** 今天（本地時區）的 YYYY-MM-DD（比對工作令到期日用） */
+function todayYMD() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 /**
  * 分頁 1：快速庫存查詢
  * - 頂部搜尋列（料號/帽型/顏色 模糊篩選）
@@ -19,6 +25,8 @@ export default function SearchTab({
   error,
   query,
   setQuery,
+  dueWos = [],
+  goToWorkOrders,
   onOpenScanner,
   goToSettings,
   onPhotoUploaded,
@@ -58,6 +66,40 @@ export default function SearchTab({
 
   return (
     <div>
+      {/* ===== 今日到期／逾期待確認工單（醒目警示，點擊前往工單管理） ===== */}
+      {dueWos.length > 0 && (
+        <button
+          onClick={goToWorkOrders}
+          className="mb-3 w-full rounded-3xl border-2 border-red-300 bg-red-50 p-4 text-left shadow-card transition active:bg-red-100 active:scale-[0.99]"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-base font-extrabold text-red-600">
+              ⏰ 到期待確認工單 {dueWos.length} 張
+            </span>
+            <span className="text-xs font-bold text-red-400">前往處理 ›</span>
+          </div>
+          <ul className="mt-2 space-y-1">
+            {dueWos.slice(0, 3).map((w) => (
+              <li
+                key={w.wo_id}
+                className="flex items-baseline justify-between gap-2 text-sm font-semibold text-slate-700"
+              >
+                <span className="truncate">
+                  <span className="font-mono text-xs text-slate-400">{w.wo_id}</span> <b>{w.style_no}</b>
+                  <span className="ml-1 text-slate-400">×{w.plan_qty}</span>
+                </span>
+                <span className={w.due_date < todayYMD() ? 'shrink-0 text-red-600' : 'shrink-0 text-amber-600'}>
+                  {w.due_date === todayYMD() ? '今日' : '逾期'} {w.due_date}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {dueWos.length > 3 && (
+            <p className="mt-1 text-xs font-bold text-red-400">還有 {dueWos.length - 3} 張…</p>
+          )}
+        </button>
+      )}
+
       {/* 搜尋列 + 掃碼按鈕（規格確認後啟用）+ 款式照片上傳 */}
       <div className="flex gap-2">
         <input

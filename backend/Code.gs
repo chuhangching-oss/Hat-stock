@@ -3,7 +3,9 @@
  * ---------------------------------------------------------------
  * 部署步驟（詳細圖文請見專案 README.md）：
  *   1. 在接到的 Google 試算表中：擴充功能 ➔ Apps Script ➔ 貼上本檔全部內容
- *   2. 先手動執行一次 setupSheets()（建立兩張表、凍結標題列、允許授權）
+ *   2. 先手動執行一次 setupSheets()（建立五張表、凍結標題列、允許授權、
+ *      安裝工作令到期檢查觸發器）
+
  *   3. 部署 ➔ 新增部署作業 ➔ 類型「網路應用程式」
  *        - 描述：knit inventory API
  *        - 執行身份：我（此試算表擁有者）
@@ -25,6 +27,24 @@
  *                   { item_code(留空→自動編號A####), item_name(必填),
  *                     category, color_spec, unit(預設PCS), location }
  *
+ * ---- 工作令（工單）連動與入庫 ----
+ *   { action: "list_work_orders", }                 → 整份工作令陣列
+ *   { action: "list_bom", }                         → 整份 BOM 物料清單
+ *   { action: "create_work_order",
+ *     style_no, plan_qty, due_date,
+ *     destination, order_ref }                      → 開立工作令（狀態=生產中）
+ *       destination : "入倉庫" | "訂單出貨"
+ *   { action: "complete_work_order",
+ *     wo_id, actual_qty, target_item_code,
+ *     use_bom, operator, remark }                   → 確認完工結案
+ *       入倉庫   : target_item_code 必填 → 成品入庫（STOCK_LOG 記錄）
+ *       訂單出貨 : 不入庫存，狀態 → 待出貨
+ *       use_bom  : true → 依 BOM_MASTER 扣原料（出庫記錄，允許負庫存）
+ *   { action: "ship_work_order", wo_id }            → 待出貨 → 已出貨
+ *
+ * 每日到期檢查：checkDueWorkOrders()（Time-driven 觸發，setupSheets 會自動安裝）
+ *   Due_Date 已過期且狀態仍為「生產中」→ 自動改為「待確認」
+ *
  * 回應：{ ok: true, data: ... } 或 { ok: false, error: "訊息" }
  **************************************************************************/
 
@@ -44,6 +64,21 @@ var LOG_HEADERS = [
 
 var OPS_HEADERS = ['序號', '姓名', '備註']; // 名冊：序號已預填 01~30，姓名之後自行填寫
 var OPS_PRESET_ROWS = 30;
+
+var SHEET_WO = 'WORK_ORDERS';           // 工作令（工單）
+var SHEET_BOM = 'BOM_MASTER';           // 物料清單（BOM）
+var WO_HEADERS = [
+  'WO_ID', 'Style_No', 'Plan_Qty', 'Due_Date',
+  'Destination', 'Order_Ref', 'Status', 'Actual_Qty', 'Completed_Time',
+];
+var BOM_HEADERS = ['Style_No', 'Item_Code', 'Item_Name', 'Unit_Use']; // Unit_Use = 每件耗用量
+
+var WO_DESTS = ['入倉庫', '訂單出貨'];
+var WO_STATUS_ACTIVE = '生產中';
+var WO_STATUS_CHECK = '待確認';
+var WO_STATUS_TOSHIP = '待出貨';
+var WO_STATUS_IN = '已入庫';
+var WO_STATUS_SHIPPED = '已出貨';
 
 var VALID_TYPES = ['入庫', '出庫', '盤點'];
 
@@ -82,6 +117,21 @@ function doPost(e) {
         break;
       case 'upload_photo':
         data = uploadPhoto_(req);
+        break;
+      case 'list_work_orders':
+        data = listWorkOrders_();
+        break;
+      case 'list_bom':
+        data = listBom_();
+        break;
+      case 'create_work_order':
+        data = createWorkOrder_(req);
+        break;
+      case 'complete_work_order':
+        data = completeWorkOrder_(req);
+        break;
+      case 'ship_work_order':
+        data = shipWorkOrder_(req);
         break;
       default:
         throw new Error('未知的 action：' + req.action + '（可用：ping / list / get / log / upload_photo）');
@@ -294,6 +344,281 @@ function getPhotoFolder_() {
   return DriveApp.createFolder(name);
 }
 
+/* ============================================================
+ * 工作令（WORK_ORDERS）與 BOM（BOM_MASTER）
+ * ============================================================ */
+
+/** 整份工作令，以 WO_ID 由新到舊排序 */
+function listWorkOrders_() {
+  var sheet = getSheet_(SHEET_WO);
+  var values = sheet.getDataRange().getValues();
+  var rows = [];
+  for (var i = 1; i < values.length; i++) {
+    if (String(values[i][0]).trim() === '') continue;
+    rows.push(rowToWO_(values[i]));
+  }
+  rows.sort(function (a, b) { return String(b.wo_id).localeCompare(String(a.wo_id)); });
+  return rows;
+}
+
+/** 整份 BOM（一列 = 一款樣式 × 一種原料） */
+function listBom_() {
+  var sheet = getSheet_(SHEET_BOM);
+  var values = sheet.getDataRange().getValues();
+  var rows = [];
+  for (var i = 1; i < values.length; i++) {
+    if (String(values[i][0]).trim() === '') continue;
+    rows.push(rowToBom_(values[i]));
+  }
+  return rows;
+}
+
+/** 找出某款式的 BOM 列 */
+function bomForStyle_(styleNo) {
+  return listBom_().filter(function (r) {
+    return String(r.style_no).trim() === String(styleNo).trim();
+  });
+}
+
+/**
+ * 開立工作令（狀態=生產中），WO_ID 自動編號 WOyyMMdd-##
+ */
+function createWorkOrder_(req) {
+  var style = String(req.style_no || '').trim();
+  if (!style) throw new Error('缺少款號 Style_No');
+  var planQty = Number(req.plan_qty);
+  if (isNaN(planQty) || planQty <= 0) throw new Error('計畫數量 Plan_Qty 必須大於 0');
+  var dest = String(req.destination || '').trim();
+  if (WO_DESTS.indexOf(dest) === -1) {
+    throw new Error('Destination 必須為：入倉庫 / 訂單出貨，收到：' + dest);
+  }
+  var due = String(req.due_date || '').trim();
+  if (!due) throw new Error('缺少預計完工日 Due_Date');
+  if (dueYMD_(due) === '') throw new Error('Due_Date 格式需為 YYYY-MM-DD：' + due);
+  var orderRef = String(req.order_ref || '').trim();
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var sheet = getSheet_(SHEET_WO);
+    var woId = nextWOId_(sheet);
+    sheet.appendRow([woId, style, planQty, dueYMD_(due), dest, orderRef, WO_STATUS_ACTIVE, '', '']);
+    return {
+      wo: rowToWO_(sheet.getRange(sheet.getLastRow(), 1, 1, WO_HEADERS.length).getValues()[0]),
+    };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
+}
+
+/**
+ * 確認完工結案：
+ * - 入倉庫 → 成品 target_item_code 入庫 Actual_Qty（STOCK_LOG 記錄，狀態 → 已入庫）
+ * - 訂單出貨 → 不入庫，狀態 → 待出貨
+ * - use_bom → 依 BOM_MASTER 扣原料（出庫記錄；不足照扣形成負庫存，前端已預覽警告）
+ * 回傳 updated_items 供前端即時更新庫存畫面
+ */
+function completeWorkOrder_(req) {
+  var woId = String(req.wo_id || '').trim();
+  if (!woId) throw new Error('缺少 WO_ID');
+  var actual = Number(req.actual_qty);
+  if (isNaN(actual) || actual < 0) throw new Error('實際良品數 Actual_Qty 格式錯誤');
+  var operator = String(req.operator || '').trim();
+  if (!operator) throw new Error('缺少經辦人 Operator');
+  var remark = String(req.remark || '').trim();
+  var useBom = !!req.use_bom;
+  var targetItem = String(req.target_item_code || '').trim();
+  var colQty = 5; // Stock_Qty 所在欄（第 5 欄 E）
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var woSheet = getSheet_(SHEET_WO);
+    var row = findWORow_(woSheet, woId);
+    if (row === -1) throw new Error('找不到工作令：' + woId);
+    var wo = rowToWO_(woSheet.getRange(row, 1, 1, WO_HEADERS.length).getValues()[0]);
+    if (wo.status !== WO_STATUS_ACTIVE && wo.status !== WO_STATUS_CHECK) {
+      throw new Error('工作令狀態為「' + wo.status + '」，不能完工');
+    }
+
+    var master = getSheet_(SHEET_MASTER);
+    var updatedItems = [];
+    var woRemark = 'WO 完工 ' + woId + (remark ? '；' + remark : '');
+
+    if (wo.destination === '入倉庫') {
+      if (!targetItem) throw new Error('入倉庫完工需選擇入庫料號 target_item_code');
+      var itemRow = findMasterRow_(master, targetItem);
+      if (itemRow === -1) throw new Error('品號不存在於 INVENTORY_MASTER：' + targetItem);
+      var cur = Number(master.getRange(itemRow, colQty).getValue()) || 0;
+      master.getRange(itemRow, colQty).setValue(cur + actual);
+      master.getRange(itemRow, 8).setValue(now_()); // Last_Updated
+      var logId = 'L' + Utilities.formatDate(new Date(), nowTz_(), 'yyyyMMddHHmmss') +
+        ('000' + Math.floor(Math.random() * 1000)).slice(-3);
+      getSheet_(SHEET_LOG).appendRow([
+        logId, now_(), '入庫', String(master.getRange(itemRow, 1).getValue()), actual, operator, woRemark,
+      ]);
+      updatedItems.push(rowToItem_(master.getRange(itemRow, 1, 1, MASTER_HEADERS.length).getValues()[0]));
+    }
+
+    // BOM 扣料（兩種流向都會耗用原料；原料不足仍照扣 → 負庫存供現場檢討）
+    var bomUsed = 0;
+    if (useBom) {
+      var bomRows = bomForStyle_(wo.style_no);
+      for (var i = 0; i < bomRows.length; i++) {
+        var code = String(bomRows[i].item_code).trim();
+        if (!code) continue;
+        var consume = Number(bomRows[i].unit_use) * actual;
+        if (!(consume > 0)) continue;
+        var mRow = findMasterRow_(master, code);
+        if (mRow === -1) continue; // BOM 內原料品號不存在 → 跳過，不擋結案
+        var mCur = Number(master.getRange(mRow, colQty).getValue()) || 0;
+        master.getRange(mRow, colQty).setValue(mCur - consume);
+        master.getRange(mRow, 8).setValue(now_());
+        var logId2 = 'L' + Utilities.formatDate(new Date(), nowTz_(), 'yyyyMMddHHmmss') +
+          ('000' + Math.floor(Math.random() * 1000)).slice(-3);
+        getSheet_(SHEET_LOG).appendRow([logId2, now_(), '出庫', code, -consume, operator, 'WO BOM 扣料 ' + woId]);
+        updatedItems.push(rowToItem_(master.getRange(mRow, 1, 1, MASTER_HEADERS.length).getValues()[0]));
+        bomUsed++;
+      }
+    }
+
+    // 更新工作令：狀態 / 實際良品數 / 完工時間
+    woSheet.getRange(row, 7).setValue(wo.destination === '入倉庫' ? WO_STATUS_IN : WO_STATUS_TOSHIP);
+    woSheet.getRange(row, 8).setValue(actual);
+    woSheet.getRange(row, 9).setValue(now_());
+
+    return {
+      wo: rowToWO_(woSheet.getRange(row, 1, 1, WO_HEADERS.length).getValues()[0]),
+      updated_items: updatedItems,
+      bom_used: bomUsed,
+    };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
+}
+
+/** 待出貨 → 已出貨（出貨單未來由此狀態連動） */
+function shipWorkOrder_(req) {
+  var woId = String(req.wo_id || '').trim();
+  if (!woId) throw new Error('缺少 WO_ID');
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var woSheet = getSheet_(SHEET_WO);
+    var row = findWORow_(woSheet, woId);
+    if (row === -1) throw new Error('找不到工作令：' + woId);
+    var wo = rowToWO_(woSheet.getRange(row, 1, 1, WO_HEADERS.length).getValues()[0]);
+    if (wo.status !== WO_STATUS_TOSHIP) {
+      throw new Error('只有「待出貨」的工作令可以登記出貨，目前：' + wo.status);
+    }
+    woSheet.getRange(row, 7).setValue(WO_STATUS_SHIPPED);
+    return { wo: rowToWO_(woSheet.getRange(row, 1, 1, WO_HEADERS.length).getValues()[0]) };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
+}
+
+/** WO_ID 自動編號：WOyyMMdd-##（當日流水號） */
+function nextWOId_(sheet) {
+  var today = Utilities.formatDate(new Date(), nowTz_(), 'yyMMdd');
+  var prefix = 'WO' + today + '-';
+  var max = 0;
+  var last = sheet.getLastRow();
+  if (last >= 2) {
+    var ids = sheet.getRange(2, 1, last - 1, 1).getValues();
+    for (var i = 0; i < ids.length; i++) {
+      var s = String(ids[i][0]).trim();
+      if (s.indexOf(prefix) === 0) {
+        var n = parseInt(s.slice(prefix.length), 10);
+        if (!isNaN(n) && n > max) max = n;
+      }
+    }
+  }
+  return prefix + ('00' + (max + 1)).slice(-2);
+}
+
+/** 依 WO_ID（不分大小寫）找工作令列號；找不到回 -1 */
+function findWORow_(sheet, woId) {
+  if (!woId) return -1;
+  var target = String(woId).trim().toUpperCase();
+  var last = sheet.getLastRow();
+  if (last < 2) return -1;
+  var ids = sheet.getRange(2, 1, last - 1, 1).getValues();
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]).trim().toUpperCase() === target) return i + 2;
+  }
+  return -1;
+}
+
+/** 工作令一列 → 前端資料物件 */
+function rowToWO_(row) {
+  return {
+    wo_id: String(row[0]).trim(),
+    style_no: String(row[1]).trim(),
+    plan_qty: Number(row[2]) || 0,
+    due_date: dueYMD_(row[3]),
+    destination: String(row[4]).trim(),
+    order_ref: String(row[5]).trim(),
+    status: String(row[6]).trim(),
+    actual_qty: row[7] === '' ? null : Number(row[7]),
+    completed_time: String(row[8] || '').trim(),
+  };
+}
+
+/** BOM 一列 → 前端資料物件 */
+function rowToBom_(row) {
+  return {
+    style_no: String(row[0]).trim(),
+    item_code: String(row[1]).trim(),
+    item_name: String(row[2]).trim(),
+    unit_use: Number(row[3]) || 0, // 單件耗用量
+  };
+}
+
+/** 任意值 → 'YYYY-MM-DD'（解析不出回 ''；支援 Date 物件與多種字串格式） */
+function dueYMD_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, nowTz_(), 'yyyy-MM-dd');
+  var s = String(v || '').trim();
+  if (!s) return '';
+  var m = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+  if (!m) return '';
+  return m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
+}
+
+/**
+ * 【Time-driven 每日觸發】到期檢查：
+ * Due_Date 已過期（< 今天）且狀態仍為「生產中」→ 自動改為「待確認」
+ * （今日到期不算逾期，由現場完成或隔日由下次檢查轉為待確認）
+ */
+function checkDueWorkOrders() {
+  var sheet = getSheet_(SHEET_WO);
+  var last = sheet.getLastRow();
+  if (last < 2) return;
+  var todayYMD = Utilities.formatDate(new Date(), nowTz_(), 'yyyy-MM-dd');
+  var values = sheet.getRange(2, 1, last - 1, WO_HEADERS.length).getValues();
+  var changed = 0;
+  for (var i = 0; i < values.length; i++) {
+    if (String(values[i][6]).trim() !== WO_STATUS_ACTIVE) continue; // 只檢查生產中
+    var due = dueYMD_(values[i][3]);
+    if (!due || due >= todayYMD) continue;
+    sheet.getRange(i + 2, 7).setValue(WO_STATUS_CHECK);
+    changed++;
+  }
+  Logger.log('工作令到期檢查完成：%s 張轉為「待確認」', changed);
+}
+
+/** 安裝每日到期檢查觸發器（重複執行會先移除舊觸發器再重裝） */
+function installDueCheckTrigger() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'checkDueWorkOrders') {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+  ScriptApp.newTrigger('checkDueWorkOrders').timeBased().everyDays(1).atHour(6).create();
+  Logger.log('已安裝「工作令到期檢查」每日觸發器（約每日 06:00 執行）');
+}
+
 /* ========================= Helpers ========================= */
 
 /** 🔐 存取碼檢查：API_TOKEN 非空時，req.token 必須一致 */
@@ -416,11 +741,14 @@ function rowToItem_(row) {
 
 /* ========================= 初始化 ========================= */
 
-/** 【手動執行一次】建立 / 修復三張工作表與標題格式 */
+/** 【手動執行一次】建立 / 修復工作表、標題格式，並安裝到期檢查觸發器 */
 function setupSheets() {
   Logger.log('建立 %s …', ensureSheet_(SHEET_MASTER));
   Logger.log('建立 %s …', ensureSheet_(SHEET_LOG));
   Logger.log('建立 %s …', ensureSheet_(SHEET_OPS));
+  Logger.log('建立 %s …', ensureSheet_(SHEET_WO));
+  Logger.log('建立 %s …', ensureSheet_(SHEET_BOM));
+  installDueCheckTrigger();
   Logger.log('完成！接著執行 seedDemoData() 可灌入示範料件（現有資料不會被覆蓋）');
 }
 
@@ -429,6 +757,8 @@ function ensureSheet_(name) {
   var sheet = spreadsheet.getSheetByName(name);
   var headers = (name === SHEET_MASTER) ? MASTER_HEADERS
               : (name === SHEET_OPS) ? OPS_HEADERS
+              : (name === SHEET_WO) ? WO_HEADERS
+              : (name === SHEET_BOM) ? BOM_HEADERS
               : LOG_HEADERS;
   if (!sheet) {
     // 全新建表：一次寫入所有標題
@@ -471,4 +801,17 @@ function seedDemoData() {
     sheet.appendRow(demo[i]);
   }
   Logger.log('示範資料完成，目前料件：%s 筆', sheet.getLastRow() - 1);
+}
+
+/** 【選用】灌入示範 BOM（對應 seedDemoData 的款式），方便測試工作令試算 */
+function seedDemoBom() {
+  var demo = [
+    // Style_No, Item_Code, Item_Name, Unit_Use（每件耗用量）
+    ['針織毛線帽 M', 'KN-YARN-007', '壓克力毛紗 30#', 0.09], // 一件約用 90g
+  ];
+  var sheet = getSheet_(SHEET_BOM);
+  for (var i = 0; i < demo.length; i++) {
+    sheet.appendRow(demo[i]);
+  }
+  Logger.log('示範 BOM 完成：%s 列', demo.length);
 }
