@@ -62,6 +62,12 @@
  *          總箱數/總金額/總淨毛重）＋ SHIPMENT_DETAILS 明細（含箱號/單價/重量）
  *       → 欄位結構對應外銷 Commercial Invoice / Packing List (DATA_ENTRY)
  *   { action: "list_shipments" }                    → 出貨單主表（匯出 Invoice / Packing List 用）
+ *   { action: "getSalesReport", operator, period? } → 營運統計報表（🔐 僅限管理者 HC / MAIN）
+ *       period: "ALL" | "YEAR"（本年）| "MONTH"（本月），預設 ALL
+ *       operator 非 HC/MAIN（不分大小寫、允許「01-HC」等名冊格式）→ 拋出權限拒絕
+ *       （Apps Script 無法設 HTTP 狀態碼，回應為 ok:false error:「權限不足…」，
+ *         前端一律以錯誤處理，絕不回傳任何營業額或匯總資料）
+ *       彙總來源：SHIPMENT_ORDERS（客戶/金額/箱重）＋ SHIPMENT_DETAILS（款式排行）
  *
  * ---- 批次出入庫（購物車模式，一次多筆品項） ----
  *   { action: "batchStockTransaction" (或 batch_stock_transaction),
@@ -125,6 +131,10 @@ var SHPD_HEADERS = [
   'Carton_No', 'Unit_Price', 'N_W', 'G_W', 'Amount', // Amount = Unit_Price × Qty
 ];
 var SHP_STATUS = '已出庫';
+
+/** 🔐 營運報表白名單：僅限這些使用者代碼可查看統計報表（商業機密）
+ *  前端 src/api.js 的 ALLOWED_MANAGERS 需與此同步 */
+var ALLOWED_MANAGERS = ['HC', 'MAIN'];
 
 var VALID_TYPES = ['入庫', '出庫', '盤點'];
 
@@ -190,6 +200,10 @@ function doPost(e) {
         break;
       case 'list_shipments':
         data = listShipments_();
+        break;
+      case 'getSalesReport':
+      case 'get_sales_report':
+        data = getSalesReport_(req);
         break;
       case 'batchStockTransaction':
       case 'batch_stock_transaction':
@@ -1137,6 +1151,34 @@ function nextShipmentId_() {
   return prefix + ('00' + (max + 1)).slice(-2);
 }
 
+/** 🔐 使用者身分是否符合報表白名單（HC / MAIN）
+ *  相容名冊格式「序號-姓名」（01-王小明）與自填格式（HC、HC-老闆、老闆-HC…）：
+ *  整串、去「數字-」前綴、'-' 前段/後段，任一段命中白名單即視為管理者。
+ *  與前端 src/api.js 的 isManager() 邏輯同步，兩邊都要改。 */
+function isManagerOp_(op) {
+  var t = String(op || '').trim().toUpperCase();
+  if (!t) return false;
+  var parts = t.split('-');
+  var candidates = [
+    t,
+    t.replace(/^\d+-/, ''),   // 01-HC → HC
+    parts[0],                 // HC-王小明 → HC
+    parts[parts.length - 1],  // 王小明-HC → HC
+  ];
+  for (var i = 0; i < candidates.length; i++) {
+    if (ALLOWED_MANAGERS.indexOf(String(candidates[i]).trim()) !== -1) return true;
+  }
+  return false;
+}
+
+/** 報表權限檢核：非白名單一律拋出拒絕（不下修、無例外） */
+function checkReportPerm_(operator) {
+  if (!isManagerOp_(operator)) {
+    throw new Error('權限不足：僅限管理者（HC / MAIN）查閱營運報表。' +
+      '目前身分：' + (String(operator || '').trim() || '未填經辦人'));
+  }
+}
+
 /** 出貨單主表（由新到舊排序；匯出 Commercial Invoice / Packing List 用） */
 function listShipments_() {
   var sheet = getSheet_(SHEET_SHP);
@@ -1166,6 +1208,125 @@ function listShipments_() {
   }
   rows.sort(function (a, b) { return String(b.shipment_id).localeCompare(String(a.shipment_id)); });
   return rows;
+}
+
+/**
+ * 營運統計報表（🔐 核心商業機密：僅限管理者 HC / MAIN 查閱）
+ * req = { operator: 使用者代碼/名稱（白名單檢核）, period?: "ALL"|"YEAR"|"MONTH" }
+ * 資料源：SHIPMENT_ORDERS（客戶業績/金額/箱數/淨毛重）＋ SHIPMENT_DETAILS（款式銷售排行）
+ * 回傳 { period, date_from, date_to, currency,
+ *        total_revenue, total_pcs, total_orders, total_customers, total_cartons, total_nw, total_gw,
+ *        customer_ranks: [{customer_name, country, orders, pcs, amount, cartons, nw, gw}],
+ *        style_ranks: [{item_code, style_no, color_spec, qty, amount}] }
+ * （客戶榜依金額降冪、款式榜依數量降冪；金額欄缺欄的舊表自動當 0 處理）
+ */
+function getSalesReport_(req) {
+  checkReportPerm_(req.operator); // 🔐 白名單之外的請求到此為止，不多讀一列資料
+  var period = String(req.period || 'ALL').trim().toUpperCase();
+  if (['ALL', 'YEAR', 'MONTH'].indexOf(period) === -1) period = 'ALL';
+  var tz = nowTz_();
+  var now = new Date();
+  var dateTo = Utilities.formatDate(now, tz, 'yyyy-MM-dd');
+  var dateFrom = '';
+  if (period === 'YEAR') dateFrom = Utilities.formatDate(now, tz, 'yyyy') + '-01-01';
+  else if (period === 'MONTH') dateFrom = Utilities.formatDate(now, tz, 'yyyy-MM') + '-01';
+
+  // ① 出貨單主表：一次讀取 → 依期間過濾（以出貨日為準）
+  var orders = listShipments_().filter(function (s) {
+    if (dateFrom && s.shipment_date) {
+      return s.shipment_date >= dateFrom && s.shipment_date <= dateTo;
+    }
+    return !dateFrom; // 指定期間但出貨日空白的單不計入（列新補日期即會出現）
+  });
+
+  // ② 客戶業績彙整
+  var countryOf = {};
+  try {
+    listCustomers_().forEach(function (c) { countryOf[c.customer_name.toUpperCase()] = c.country; });
+  } catch (e) { /* 客戶表讀失敗不影響主彙整 */ }
+  var custMap = {};
+  var currency = '';
+  var totRevenue = 0, totPcs = 0, totCartons = 0, totNW = 0, totGW = 0;
+  for (var i = 0; i < orders.length; i++) {
+    var s = orders[i];
+    var cname = s.customer_name || '（未填客戶）';
+    if (!custMap[cname]) {
+      custMap[cname] = {
+        customer_name: cname,
+        country: countryOf[String(cname).toUpperCase()] || '',
+        orders: 0, pcs: 0, amount: 0, cartons: 0, nw: 0, gw: 0,
+      };
+    }
+    var c = custMap[cname];
+    c.orders += 1;
+    c.pcs += s.total_pcs;
+    c.amount += s.total_amount;
+    c.cartons += s.total_cartons;
+    c.nw += s.total_nw;
+    c.gw += s.total_gw;
+    totRevenue += s.total_amount;
+    totPcs += s.total_pcs;
+    totCartons += s.total_cartons;
+    totNW += s.total_nw;
+    totGW += s.total_gw;
+    if (!currency && s.currency) currency = s.currency;
+  }
+  var customerRanks = [];
+  for (var key in custMap) {
+    var cr = custMap[key];
+    cr.amount = round4_(cr.amount);
+    cr.nw = round4_(cr.nw);
+    cr.gw = round4_(cr.gw);
+    customerRanks.push(cr);
+  }
+  customerRanks.sort(function (a, b) { return b.amount - a.amount || b.pcs - a.pcs; });
+
+  // ③ 款式銷售排行：SHIPMENT_DETAILS 逐列（限主表期間內的出貨單）
+  var shipDateOf = {};
+  orders.forEach(function (s) { shipDateOf[s.shipment_id] = true; });
+  var styleMap = {};
+  if (orders.length > 0) {
+    var detValues = getSheet_(SHEET_SHPD).getDataRange().getValues();
+    for (var d = 1; d < detValues.length; d++) {
+      var row = detValues[d];
+      var sid = String(row[0]).trim();
+      if (!shipDateOf[sid]) continue;
+      var code = String(row[1]).trim();
+      if (!code) continue;
+      var qty = Number(row[4]) || 0;
+      var price = Number(row[7]) || 0;
+      var amount = Number(row[10]) || (price > 0 ? price * qty : 0);
+      if (!styleMap[code]) {
+        styleMap[code] = { item_code: code, style_no: String(row[2]).trim(), color_spec: String(row[3]).trim(), qty: 0, amount: 0 };
+      }
+      styleMap[code].qty += qty;
+      styleMap[code].amount += amount;
+    }
+  }
+  var styleRanks = [];
+  for (var k in styleMap) {
+    styleRanks.push(styleMap[k]);
+  }
+  styleRanks.sort(function (a, b) { return b.qty - a.qty || b.amount - a.amount; });
+  styleRanks = styleRanks.slice(0, 20).map(function (it) {
+    return { item_code: it.item_code, style_no: it.style_no, color_spec: it.color_spec, qty: round4_(it.qty), amount: round4_(it.amount) };
+  });
+
+  return {
+    period: period,
+    date_from: dateFrom || '（全部）',
+    date_to: dateTo,
+    currency: currency || 'USD',
+    total_revenue: round4_(totRevenue),
+    total_pcs: round4_(totPcs),
+    total_orders: orders.length,
+    total_customers: customerRanks.length,
+    total_cartons: round4_(totCartons),
+    total_nw: round4_(totNW),
+    total_gw: round4_(totGW),
+    customer_ranks: customerRanks,
+    style_ranks: styleRanks,
+  };
 }
 
 /** 【選用】灌入示範客戶清單（Spec 中之外銷客戶），方便第一次測試 */

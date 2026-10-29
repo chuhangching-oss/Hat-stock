@@ -34,6 +34,27 @@ export function setOperator(name) {
   localStorage.setItem(OPERATOR_KEY, (name || '').trim());
 }
 
+/** 🔐 營運報表白名單：僅限這些使用者代碼查看統計報表（商業機密）
+ *  後端 Code.gs 的 ALLOWED_MANAGERS 需與此同步 */
+export const ALLOWED_MANAGERS = ['HC', 'MAIN'];
+
+/** 此使用者是否為管理者（可查看營運報表）。
+ *  相容名冊格式「序號-姓名」（01-HC）與自填格式（HC、HC-老闆、老闆-HC…）：
+ *  整串、去「數字-」前綴、'-' 前段/後段，任一段命中白名單即視為管理者。
+ *  與後端 Code.gs 的 isManagerOp_() 邏輯同步，兩邊都要改。 */
+export function isManager(name = getOperator()) {
+  const t = String(name || '').trim().toUpperCase();
+  if (!t) return false;
+  const parts = t.split('-');
+  const candidates = [
+    t,
+    t.replace(/^\d+-/, ''), // 01-HC → HC
+    parts[0], // HC-王小明 → HC
+    parts[parts.length - 1], // 王小明-HC → HC
+  ];
+  return ALLOWED_MANAGERS.some((m) => candidates.includes(m));
+}
+
 /**
  * 呼叫 GAS API
  * @param {string} gasUrl Apps Script Web App 執行網址 (.../exec)

@@ -1,20 +1,23 @@
 import { useCallback, useEffect, useState } from 'react';
 import useInventory from './hooks/useInventory';
 import useWorkOrders from './hooks/useWorkOrders';
-import { gasRequest, getGasUrl } from './api';
+import { gasRequest, getGasUrl, isManager } from './api';
 import SearchTab from './components/SearchTab';
 import ActionTab from './components/ActionTab';
 import WorkOrderTab from './components/WorkOrderTab';
 import ShipmentTab from './components/ShipmentTab';
+import AnalyticsTab from './components/AnalyticsTab';
 import SettingsTab from './components/SettingsTab';
 import Scanner from './components/Scanner';
 import Toast from './components/Toast';
+// 📊 營運報表 = 核心商業機密：僅管理者（HC / MAIN）顯示導覽按鈕與內容
 const TABS = [
-  { key: 'search', label: '庫存查詢', icon: '🔍' },
-  { key: 'action', label: '出入庫', icon: '📦' },
-  { key: 'wo', label: '工單管理', icon: '📋' },
-  { key: 'ship', label: '出庫出貨', icon: '🚢' },
-  { key: 'settings', label: '設定', icon: '⚙️' },
+  { key: 'search', label: '庫存查詢', icon: '🔍', managerOnly: false },
+  { key: 'action', label: '出入庫', icon: '📦', managerOnly: false },
+  { key: 'wo', label: '工單管理', icon: '📋', managerOnly: false },
+  { key: 'ship', label: '出庫出貨', icon: '🚢', managerOnly: false },
+  { key: 'report', label: '營運報表', icon: '📊', managerOnly: true },
+  { key: 'settings', label: '設定', icon: '⚙️', managerOnly: false },
 ];
 
 export default function App() {
@@ -235,6 +238,7 @@ export default function App() {
             goToSettings={() => setTab('settings')}
           />
         )}
+        {tab === 'report' && <AnalyticsTab showToast={showToast} />}
         {tab === 'settings' && (
           <SettingsTab
             showToast={showToast}
@@ -246,11 +250,12 @@ export default function App() {
       {/* ===== 底部分頁導覽（大按鈕、好戴手套點擊） ===== */}
       <nav className="fixed inset-x-0 bottom-0 z-20 border-t border-slate-200 bg-white/95 backdrop-blur">
         <div className="mx-auto flex max-w-lg justify-around pb-[env(safe-area-inset-bottom)]">
-          {TABS.map((t) => (
+          {/* 一般使用者隱藏「營運報表」（managerOnly）；AnalyticsTab 內另有第二道權限防護 */}
+          {TABS.filter((t) => !t.managerOnly || isManager()).map((t) => (
             <button
               key={t.key}
               onClick={() => setTab(t.key)}
-              className={`flex min-h-touch w-1/5 flex-col items-center justify-center py-2 text-xs font-bold transition ${
+              className={`flex min-h-touch flex-1 flex-col items-center justify-center py-2 text-xs font-bold transition ${
                 tab === t.key ? 'text-blue-700' : 'text-slate-400'
               }`}
             >

@@ -40,7 +40,7 @@ knit-factory-inventory/
     └── components/
         ├── SearchTab.jsx         # 分頁1：搜尋 + 掃碼 + 卡片清單（<=10 紅字警示）
         ├── ActionTab.jsx         # 分頁2：入庫/出庫/盤點 + 防呆 + 二次確認
-        ├── SettingsTab.jsx       # 分頁3：API 網址 / 經辦人 / 連線測試
+        ├── AnalyticsTab.jsx      # 分頁5：營運報表（🔐 僅限 HC / MAIN）
         ├── Scanner.jsx           # 全螢幕相機掃碼（含手動輸入備援）
         ├── ConfirmDialog.jsx     # 底部抽屜式確認彈窗
         └── Toast.jsx
@@ -148,6 +148,30 @@ npm run dev
 `Due_Date` 已過期且狀態仍為「生產中」的自動轉為「**待確認**」，
 App 首頁會出現醒目的「⏰ 到期待確認工單」清單。
 
+#### 營運統計報表（🔐 僅限管理者 HC / MAIN）
+
+「📊 營運報表」分頁彙整出貨資料做營運統計：
+**總營收（USD）／出貨訂單數／出貨件數／客戶數／總箱數／總淨毛重**、
+**客戶採購業績金額排行**（MOONBAT、KURIHARA…，依金額降冪附比例長條）、
+**款式銷售總量排行 Top 20**（依出貨數量降冪，含金額）；期間可切換
+**全部／本年／本月**，統計以出貨日為準。資料源為
+SHIPMENT_ORDERS ＋ SHIPMENT_DETAILS（金額欄缺欄的舊資料自動以 0 計）。
+
+**白名單權限（雙重防護）**：款式銷量、客戶採購金額與總營收屬核心商業機密，
+*只有經辦人身分為 **HC** 或 **MAIN** 的使用者可以使用此報表*：
+
+1. 前端：一般使用者的底部分頁**不顯示「營運報表」按鈕**；即使以其他方式切到
+   分頁，也只顯示「🔒 無權限存取此報表：僅限授權管理者（HC / MAIN）查閱」，
+   且**不會發出任何 API 請求**。
+2. 後端：`getSalesReport` 收到請求先檢核 `operator`，非 `HC` / `MAIN`
+   （不分大小寫，相容名冊格式 `01-HC`／自填 `HC-老闆` 等）直接拋出
+   權限拒絕（回應 `ok:false, error:"權限不足…"`；Apps Script 無法自訂
+   HTTP 狀態碼，效果等同 403），**絕不回傳營業額或任何匯總資料**。
+
+白名單寫在後端 `Code.gs` 的 `ALLOWED_MANAGERS` 與前端 `src/api.js` 的
+`ALLOWED_MANAGERS`（兩處需同步），日後要開放第三位管理者的話兩邊各加一個代碼即可。
+身分判定：以「設定」分頁填寫的經辦人為準。
+
 **CUSTOMERS（客戶清單）**
 
 | Customer_ID | Customer_Name | Country |
@@ -221,6 +245,13 @@ POST { action:"batchStockTransaction",           （或 batch_stock_transaction�
        主檔兩欄 setValues 一次寫回、STOCK_LOG 批次附加；
        出庫且有填 customer → 同時建立出貨單
 POST { action:"list_shipments" }                           → 出貨單主表（匯出 Invoice/Packing List 用）
+POST { action:"getSalesReport",                            （或 get_sales_report）
+       operator, period?:"ALL"|"YEAR"|"MONTH" }            → 營運統計報表
+       🔐 僅限管理者 HC / MAIN（不分大小寫、容許 01-HC 等名冊格式）：
+       其他身分直接拋「權限不足…」（ok:false，等同 403），
+       不回傳任何營業額／客戶金額／款式銷量。
+       回傳：總營收/訂單/件數/客戶數/箱數/淨毛重 + 客戶業績排行 + 款式銷量排行，
+       統計源 SHIPMENT_ORDERS/DETAILS，以出貨日過濾期間（ALL=全部）
 回應固定為 { ok:true, data:… } 或 { ok:false, error:"…" }
 ```
 
