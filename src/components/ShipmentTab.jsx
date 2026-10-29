@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { gasRequest, getGasUrl, getOperator } from '../api';
 import ConfirmDialog from './ConfirmDialog';
+import BatchItemPicker from './BatchItemPicker';
 
 /** 掃碼／手動輸入文字 → 對應料件（先比對序號，再比對品名） */
 function resolveByScan(items, text) {
@@ -64,8 +65,7 @@ export default function ShipmentTab({
 
   // ===== 明細列 =====
   const [lines, setLines] = useState([]); // [{ item, qty, carton, price, nw, gw }]
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [pickerFilter, setPickerFilter] = useState('');
+  const [batchOpen, setBatchOpen] = useState(false); // 批次挑選彈窗
 
   // ===== 送出 =====
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -87,12 +87,33 @@ export default function ShipmentTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** 加入一列明細（同一品號可分列多箱） */
+  /** 掃碼加入一列明細（數量留空待填） */
   function addLine(item) {
     setLines((prev) => [
       ...prev,
       { item, qty: '', carton: '', price: '', nw: '', gw: '' },
     ]);
+  }
+
+  /**
+   * 批次挑選彈窗：【整批帶入】一次性推入全部勾選品項
+   * （單次 setState，同品號已存在時直接累加到既有那一列）
+   */
+  function addLines(list) {
+    setLines((prev) => {
+      const next = [...prev];
+      const idxByCode = new Map(prev.map((l, i) => [l.item.item_code, i]));
+      list.forEach(({ item, qty }) => {
+        const i = idxByCode.get(item.item_code);
+        if (i === undefined) {
+          idxByCode.set(item.item_code, next.length);
+          next.push({ item, qty: String(qty), carton: '', price: '', nw: '', gw: '' });
+        } else {
+          next[i] = { ...next[i], qty: String(Number(next[i].qty) + qty) };
+        }
+      });
+      return next;
+    });
   }
 
   // 掃碼／手動輸入結果 → 加入明細列
@@ -155,15 +176,6 @@ export default function ShipmentTab({
   const finalCustomer = custMode === 'list' ? custName.trim() : newName.trim();
 
   const canSubmit = !!finalCustomer && !!shipDate && allFilled && overLines.length === 0;
-
-  // 料件選取清單（清單／模糊搜尋）
-  const filteredPicker = useMemo(() => {
-    const f = pickerFilter.trim().toLowerCase();
-    if (!f) return items;
-    return items.filter((it) =>
-      `${it.item_code} ${it.item_name} ${it.color_spec} ${it.category}`.toLowerCase().includes(f),
-    );
-  }, [items, pickerFilter]);
 
   async function handleConfirmSubmit() {
     setBusy(true);
@@ -429,13 +441,10 @@ export default function ShipmentTab({
       <div className="mt-4 space-y-3">
         <div className="flex gap-2">
           <button
-            onClick={() => {
-              setPickerFilter('');
-              setPickerOpen(true);
-            }}
+            onClick={() => setBatchOpen(true)}
             className="min-h-touch flex-1 rounded-2xl bg-blue-700 py-2.5 text-base font-extrabold text-white shadow-card transition active:bg-blue-800 active:scale-[0.98]"
           >
-            ＋ 加入出貨明細
+            ＋ 批次加入品項（多選）
           </button>
           <button
             onClick={onOpenScanner}
@@ -446,6 +455,9 @@ export default function ShipmentTab({
             <span className="mt-0.5 text-[10px] font-bold">掃碼加入</span>
           </button>
         </div>
+        <p className="px-1 text-xs font-bold text-slate-400">
+          打開「批次加入」可一次勾選多款並逐列填出庫數量，一次整批帶入；或用掃碼單筆加入
+        </p>
 
         {lines.map((l, idx) => {
           const it = l.item;
@@ -605,59 +617,17 @@ export default function ShipmentTab({
         </div>
       )}
 
-      {/* ===== 料件選取清單 ===== */}
-      {pickerOpen && (
-        <div
-          className="fixed inset-0 z-30 flex items-end justify-center bg-black/50 p-4 sm:items-center"
-          onClick={() => setPickerOpen(false)}
-        >
-          <div
-            className="max-h-[75vh] w-full max-w-md overflow-y-auto rounded-3xl bg-white p-4 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-lg font-extrabold">選擇出貨料件</h3>
-              <button className="text-slate-400" onClick={() => setPickerOpen(false)}>✕</button>
-            </div>
-            <input
-              className="field-input mb-3"
-              placeholder="搜尋：品號 / 帽型 / 顏色…"
-              value={pickerFilter}
-              onChange={(e) => setPickerFilter(e.target.value)}
-            />
-            <p className="mb-2 px-1 text-xs font-bold text-slate-400">共 {filteredPicker.length} 筆</p>
-            <ul className="space-y-2">
-              {filteredPicker.slice(0, 200).map((it) => (
-                <li key={it.item_code}>
-                  <button
-                    onClick={() => {
-                      addLine(it);
-                      setPickerOpen(false);
-                    }}
-                    disabled={it.stock_qty <= 0}
-                    className="w-full rounded-2xl bg-slate-50 p-3 text-left text-sm font-semibold text-slate-800 transition enabled:active:bg-blue-100 disabled:opacity-40"
-                  >
-                    <b>{it.item_name}</b>
-                    {it.color_spec && <span className="text-slate-500">（{it.color_spec}）</span>}
-                    <span className="float-right font-black text-slate-700">
-                      {it.stock_qty} {it.unit}
-                    </span>
-                    <span className="block text-xs text-slate-400">
-                      {it.item_code}
-                      {it.stock_qty <= 0 && ' （無庫存）'}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-            {filteredPicker.length > 200 && (
-              <p className="mt-2 text-center text-xs text-slate-400">
-                只顯示前 200 筆，請用上方搜尋縮小範圍
-              </p>
-            )}
-          </div>
-        </div>
-      )}
+      {/* ===== 批次挑選彈窗（多選＋逐列填數量 → 整批帶入） ===== */}
+      <BatchItemPicker
+        open={batchOpen}
+        items={items}
+        showToast={showToast}
+        onClose={() => setBatchOpen(false)}
+        onPick={(list) => {
+          addLines(list); // 單次 setState 整批推入
+          setBatchOpen(false);
+        }}
+      />
 
       {/* ===== 送出前確認彈窗 ===== */}
       <ConfirmDialog

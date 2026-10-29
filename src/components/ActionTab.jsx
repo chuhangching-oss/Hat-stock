@@ -3,6 +3,7 @@ import { CATEGORY_COLORS, LOW_STOCK_THRESHOLD } from '../constants';
 import { getOperator, gasRequest, getGasUrl } from '../api';
 import PhotoButton from './PhotoButton';
 import ConfirmDialog from './ConfirmDialog';
+import BatchItemPicker from './BatchItemPicker';
 
 const MODES = [
   {
@@ -104,9 +105,8 @@ export default function ActionTab({
   const [saveNewCust, setSaveNewCust] = useState(true);
   const [custQuickOpen, setCustQuickOpen] = useState(false);
 
-  // ===== 選取清單 =====
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [pickerFilter, setPickerFilter] = useState('');
+  // ===== 批次挑選彈窗 =====
+  const [batchOpen, setBatchOpen] = useState(false);
 
   // ===== 新品項（單筆入庫，保留原流程） =====
   const [newOpen, setNewOpen] = useState(false);
@@ -180,7 +180,7 @@ export default function ActionTab({
     // 自動清空 + 聚焦：立刻可掃／選「下一筆」
     setSelected(null);
     setQty('');
-    setPickerOpen(true);
+    setBatchOpen(true);
   }
 
   const setLineQty = (idx) => (e) => {
@@ -213,11 +213,29 @@ export default function ActionTab({
   const newQtyValid = isFinite(newQtyNum) && newQtyNum > 0;
   const newAfter = newQtyValid ? newQtyNum : 0;
 
-  const filteredPicker = items.filter((it) => {
-    const f = pickerFilter.trim().toLowerCase();
-    if (!f) return true;
-    return `${it.item_code} ${it.item_name} ${it.color_spec} ${it.category}`.toLowerCase().includes(f);
-  });
+  /**
+   * 批次挑選彈窗：整批帶入 → 單次 setState 併入暫存清單
+   * - 已存在同品號：出入庫模式 → 數量累加；盤點模式 → 直接覆蓋為盤後值
+   */
+  function pickLines(list) {
+    setLines((prev) => {
+      const idxByCode = new Map(prev.map((l, i) => [l.item.item_code, i]));
+      const next = [...prev];
+      list.forEach(({ item, qty }) => {
+        const i = idxByCode.get(item.item_code);
+        if (i === undefined) {
+          idxByCode.set(item.item_code, next.length);
+          next.push({ item, qty: String(qty) });
+        } else if (mode === 'COUNT') {
+          next[i] = { ...next[i], qty: String(qty) };
+        } else {
+          next[i] = { ...next[i], qty: String(Number(next[i].qty) + qty) };
+        }
+      });
+      return next;
+    });
+    setBatchOpen(false);
+  }
 
   function handleOpenConfirm() {
     if (!lines.length) return showToast('❌ 清單尚未加入任何品項', 'error');
@@ -524,13 +542,10 @@ export default function ActionTab({
             <label className="field-label">料件（已選：{selected ? itemTitle(selected) : '未選擇'}）</label>
             <div className="flex gap-2">
               <button
-                onClick={() => {
-                  setPickerFilter('');
-                  setPickerOpen(true);
-                }}
+                onClick={() => setBatchOpen(true)}
                 className={`field-input flex-1 truncate text-left ${selected ? 'bg-blue-50/60' : 'text-slate-400'}`}
               >
-                {selected ? itemTitle(selected) : '📋 點此從清單選取帽型…'}
+                {selected ? itemTitle(selected) : '📋 批次挑選品項（多選）…'}
               </button>
               <PhotoButton
                 items={items}
@@ -717,81 +732,14 @@ export default function ActionTab({
         </div>
       )}
 
-      {/* ===== 料件選取清單（品名搜尋） ===== */}
-      {pickerOpen && (
-        <div
-          className="fixed inset-0 z-30 flex items-end justify-center bg-black/50 p-4 sm:items-center"
-          onClick={() => setPickerOpen(false)}
-        >
-          <div
-            className="max-h-[75vh] w-full max-w-md overflow-y-auto rounded-3xl bg-white p-4 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-lg font-extrabold">選擇料件（還要加第 {lines.length + 1} 項）</h3>
-              <button className="text-slate-400" onClick={() => setPickerOpen(false)}>✕</button>
-            </div>
-            <div className="mb-3 flex gap-2">
-              <input
-                className="field-input flex-1"
-                placeholder="搜尋：帽型 / 顏色 / 品號"
-                value={pickerFilter}
-                onChange={(e) => setPickerFilter(e.target.value)}
-              />
-              <button
-                onClick={() => {
-                  setPickerOpen(false);
-                  setTimeout(() => onOpenScanner(), 10);
-                }}
-                className="flex w-14 shrink-0 flex-col items-center justify-center rounded-2xl bg-blue-700 text-white transition active:bg-blue-800 active:scale-95"
-              >
-                <span className="text-2xl leading-none">📷</span>
-                <span className="mt-0.5 text-[10px] font-bold">掃碼</span>
-              </button>
-            </div>
-            <p className="mb-2 px-1 text-xs font-bold text-slate-400">共 {filteredPicker.length} 筆</p>
-            <ul className="space-y-2">
-              {filteredPicker.slice(0, 200).map((it) => (
-                <li key={it.item_code}>
-                  <button
-                    onClick={() => {
-                      const dup = lines.some(
-                        (l) => String(l.item.item_code).toLowerCase() === String(it.item_code).toLowerCase(),
-                      );
-                      if (dup) {
-                        showToast(`⚠️ ${itemTitle(it)} 已在清單中，請直接修改該列數量`, 'error');
-                        setPickerOpen(false);
-                        return;
-                      }
-                      setSelected(it);
-                      setQty('');
-                      setPickerOpen(false);
-                    }}
-                    className="w-full rounded-2xl bg-slate-50 p-3 text-left text-sm font-semibold text-slate-800 transition active:bg-blue-100"
-                  >
-                    <span
-                      className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                        CATEGORY_COLORS[it.category] || 'bg-slate-100 text-slate-600'
-                      }`}
-                    >
-                      {it.category}
-                    </span>
-                    {'  '}
-                    <b>{it.item_name}</b>
-                    {it.color_spec && <span className="text-slate-500">（{it.color_spec}）</span>}
-                    <span className="float-right font-black text-slate-700">
-                      {it.stock_qty} {it.unit}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-            {filteredPicker.length > 200 && (
-              <p className="mt-2 text-center text-xs text-slate-400">只顯示前 200 筆，請用搜尋縮小範圍</p>
-            )}
-          </div>
-        </div>
-      )}
+      {/* ===== 批次挑選彈窗（多選＋逐列填數量 → 整批帶入暫存清單） ===== */}
+      <BatchItemPicker
+        open={batchOpen}
+        items={items}
+        showToast={showToast}
+        onClose={() => setBatchOpen(false)}
+        onPick={pickLines}
+      />
 
       {/* ===== 經辦人名冊選單 ===== */}
       {opPickerOpen && (
