@@ -139,6 +139,7 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast, 
   const manager = isManager();
   const [editLog, setEditLog] = useState(null);   // 正在編輯的紀錄列
   const [editQty, setEditQty] = useState('');     // 新異動量（簽號：出庫負／入庫正）
+  const [editRemark, setEditRemark] = useState(''); // 新備註（客人份額寫在備註裡，改它＝改份額）
   const [editDelArm, setEditDelArm] = useState(false); // 刪除兩段式保險
   const [editBusy, setEditBusy] = useState(false);
 
@@ -208,29 +209,53 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast, 
   function openEdit(l) {
     setEditLog(l);
     setEditQty(String(l.change_qty ?? ''));
+    setEditRemark(String(l.remark || ''));
     setEditDelArm(false);
   }
+
+  /** 這列出庫備註裡各客人的份額（解析規則跟選客模式一致） */
+  const editShares = useMemo(() => {
+    if (!editLog || editLog.type !== '出庫') return [];
+    return custOptions
+      .map((c) => ({ name: c.customer_name, qty: rowQtyForCustomer(editLog, c.customer_name) }))
+      .filter((x) => Number(x.qty) > 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editLog]);
 
   async function handleEditSubmit() {
     if (!editLog || editBusy) return;
     const willDelete = editDelArm;
     const oldQ = Number(editLog.change_qty) || 0;
-    if (!willDelete) {
-      const nq = Number(editQty);
-      if (!isFinite(nq)) return showToast('❌ 異動量請填數字（出庫負數／入庫正數）', 'error');
-      if (nq === oldQ) return showToast('⚠️ 數量沒有變更', 'error');
-    }
+    if (editBusy) return;
     setEditBusy(true);
     try {
       const payload = { action: 'correct_stock_log', log_id: editLog.log_id, operator: getOperator() };
-      if (willDelete) payload.delete = true;
-      else payload.new_qty = Number(editQty);
+      if (willDelete) {
+        payload.delete = true;
+      } else {
+        const hasQtyChange = editLog.type !== '盤點' && Number(editQty) !== oldQ && editQty !== '' && isFinite(Number(editQty));
+        const hasRmChange = editRemark.trim() !== String(editLog.remark || '');
+        if (!hasQtyChange && !hasRmChange) {
+          setEditBusy(false);
+          return showToast('⚠️ 數量與備註都沒有變更', 'error');
+        }
+        if (hasQtyChange) {
+          if (!isFinite(Number(editQty))) {
+            setEditBusy(false);
+            return showToast('❌ 異動量請填數字（出庫負數／入庫正數）', 'error');
+          }
+          payload.new_qty = Number(editQty);
+        }
+        if (hasRmChange) payload.new_remark = editRemark.trim();
+      }
       const res = await gasRequest(getGasUrl(), payload);
       if (res.item && onItemsUpdated) onItemsUpdated(res.item);
       showToast(
         willDelete
           ? `🗑 已刪除紀錄 ${editLog.log_id}：庫存已回補`
-          : `✅ 已修正 ${editLog.item_code}：${editLog.change_qty} → ${res.new_change}，庫存已同步`,
+          : payload.new_qty !== undefined
+            ? `✅ 已修正 ${editLog.item_code}：${oldQ} → ${res.new_change}，庫存已同步`
+            : `✅ 已更新備註（${editLog.item_code}）`,
       );
       setEditBusy(false);
       setEditLog(null);
@@ -503,7 +528,7 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast, 
                 </p>
               ) : (
                 <div>
-                  <label className="field-label">異動數量（出庫＝負數 −n，入庫＝正數 +n）</label>
+                  <label className="field-label">異動數量（＝這列出庫的總量；出庫負數 −n／入庫正數 +n）</label>
                   <input
                     className="field-input tabular-nums text-right text-lg font-black"
                     type="number"
@@ -515,14 +540,38 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast, 
                     }}
                   />
                   <p className="mt-1 px-1 text-[10px] font-bold text-slate-400">
-                    儲存後庫存會自動加（新−舊）差額；例：原紀錄 −17 改成 −12 → 庫存回補 5
+                    儲存後庫存自動加（新−舊）差額。例：原紀錄 −17 改成 −12 → 庫存回補 5
                   </p>
                 </div>
               )}
 
+              {editShares.length > 0 && (
+                <div className="rounded-2xl bg-blue-50 px-3 py-2 ring-1 ring-blue-200">
+                  <p className="text-[11px] font-extrabold text-blue-800">
+                    👥 這列備註裡各客份額（選客模式看到的就是這些）：
+                    {editShares.map((x) => `${x.name} ${fmtQty(x.qty)}`).join('／')}
+                  </p>
+                  <p className="mt-0.5 text-[10px] font-bold text-blue-500">
+                    數量欄是整列總量；要改某個客人的份額 → 改下方備註裡的名字／數字
+                  </p>
+                </div>
+              )}
+
+              <div>
+                <label className="field-label">備註（客人份額／日期／單號都寫在這裡，可直接改）</label>
+                <input
+                  className="field-input"
+                  value={editRemark}
+                  onChange={(e) => {
+                    setEditRemark(e.target.value);
+                    setEditDelArm(false);
+                  }}
+                />
+              </div>
+
               <button
                 className="btn-primary"
-                disabled={editBusy || (!editDelArm && editLog.type === '盤點')}
+                disabled={editBusy || (!editDelArm && editLog.type === '盤點' && editRemark.trim() === String(editLog.remark || ''))}
                 onClick={handleEditSubmit}
               >
                 {editBusy ? '處理中…' : editDelArm ? '⚠️ 確認刪除整列（庫存回補）' : '💾 儲存修改'}
