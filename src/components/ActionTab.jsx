@@ -286,7 +286,26 @@ export default function ActionTab({
         operator: operator.trim(),
         remark: remark.trim(),
         force: mode === 'OUT' && force, // 補帳模式：允許負庫存（後端自動標註「⚠️負庫存待盤」）
-        items: lines.map((l) => ({ item_code: l.item.item_code, qty: Number(l.qty) })),
+        // 🆕 新品項（item.__new）→ 附 new_item 讓後端自動建主檔（品號留空＝自動編號）
+        items: lines.map((l) =>
+          l.item.__new
+            ? {
+                item_code: l.item.item_code || '',
+                qty: Number(l.qty),
+                new_item: {
+                  item_code: l.item.item_code || '',
+                  item_name: l.item.item_name,
+                  color_spec: l.item.color_spec || '',
+                  category: l.item.category,
+                  unit: l.item.unit,
+                  location: l.item.location || '',
+                  style_category: l.item.style_category || '',
+                  season: l.item.season || '',
+                  is_public: 'Y',
+                },
+              }
+            : { item_code: l.item.item_code, qty: Number(l.qty) },
+        ),
       });
       try {
         localStorage.setItem('kfi_operator', operator.trim());
@@ -350,6 +369,53 @@ export default function ActionTab({
   function closeNew() {
     setNewOpen(false);
     setDraft(EMPTY_DRAFT);
+  }
+
+  /** 新品項 → 加入批次清單（先建立暫存列，跟其他品項一起整批送出；品號留空＝送出時自動編號） */
+  function addDraftToBatch() {
+    if (!draft.item_name.trim()) return showToast('❌ 新品項請填寫「品名」', 'error');
+    const q = Number(qty);
+    if (!isFinite(q) || q <= 0) return showToast('❌ 請填寫入庫數量（必須大於 0）', 'error');
+    const customCode = draft.item_code.trim().toUpperCase();
+    if (
+      customCode &&
+      items.some((it) => String(it.item_code).trim().toUpperCase() === customCode)
+    ) {
+      return showToast(`❌ 品號 ${customCode} 已存在，請改用清單選取，或換一個品號`, 'error');
+    }
+    const newItemObj = {
+      __new: true, // 標記：此列是尚未建檔的新品項
+      item_code: customCode,
+      item_name: draft.item_name.trim(),
+      color_spec: draft.color_spec.trim(),
+      category: draft.category,
+      unit: draft.unit.trim() || 'PCS',
+      location: draft.location.trim(),
+      style_category: draft.style_category,
+      season: draft.season,
+      stock_qty: 0,
+    };
+    setLines((prev) => {
+      // 同名同色的新品項已在清單 → 數量合併成一列
+      const i = prev.findIndex(
+        (l) =>
+          l.item.__new &&
+          l.item.item_name === newItemObj.item_name &&
+          (l.item.color_spec || '') === newItemObj.color_spec,
+      );
+      if (i >= 0) {
+        const next = [...prev];
+        next[i] = { ...next[i], qty: String(Number(next[i].qty) + q) };
+        return next;
+      }
+      return [...prev, { item: newItemObj, qty: String(q) }];
+    });
+    showToast(
+      `🆕「${newItemObj.item_name}${newItemObj.color_spec ? `（${newItemObj.color_spec}）` : ''} × ${q}」已加入批次清單` +
+        (customCode ? '' : '，品號送出時自動編號'),
+    );
+    closeNew();
+    setQty('');
   }
 
   const setDraftField = (key) => (e) => setDraft((d) => ({ ...d, [key]: e.target.value }));
@@ -475,7 +541,7 @@ export default function ActionTab({
         <div className="mt-4 space-y-4 rounded-3xl bg-white p-5 shadow-card">
           <div className="flex items-center justify-between">
             <span className="text-sm font-extrabold text-emerald-700">
-              🆕 入庫新品項（自動建立主檔資料，單筆立即入庫）
+              🆕 入庫新品項（自動建立主檔；可單筆直送或加入批次清單）
             </span>
             <button onClick={closeNew} className="text-xs font-bold text-slate-400">
               改用清單選取
@@ -569,9 +635,17 @@ export default function ActionTab({
               onChange={(e) => setQty(e.target.value)}
             />
           </div>
-          <button className="btn-primary" onClick={handleOpenNewConfirm}>
-            入庫「{newItem.item_name.trim() || '新品項'} × {newQtyValid ? newQtyNum : '?'}」
-          </button>
+          <div className="space-y-2">
+            <button className="btn-primary" onClick={addDraftToBatch}>
+              🛒 加入批次清單（跟其他品項一起送出）
+            </button>
+            <button
+              onClick={handleOpenNewConfirm}
+              className="min-h-touch w-full rounded-2xl bg-emerald-100 py-2.5 text-sm font-extrabold text-emerald-700 transition active:scale-[0.98]"
+            >
+              或單筆立即送出「{newItem.item_name.trim() || '新品項'} × {newQtyValid ? newQtyNum : '?'}」
+            </button>
+          </div>
         </div>
       ) : (
         <div className="mt-4 space-y-4 rounded-3xl bg-white p-5 shadow-card">
@@ -683,14 +757,23 @@ export default function ActionTab({
           const over = mode === 'OUT' && valid && q > (l.item.stock_qty || 0);
           return (
             <div
-              key={l.item.item_code}
+              key={`${l.item.item_code}-${idx}`}
               className={`rounded-2xl bg-white p-3 shadow-card ${over ? 'border-2 border-red-400' : 'border border-slate-100'}`}
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <div className="flex items-baseline gap-2">
                     <span className="text-xs font-black text-slate-400">#{idx + 1}</span>
-                    <span className="font-mono text-xs text-slate-400">{l.item.item_code}</span>
+                    {l.item.__new ? (
+                      <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-extrabold text-emerald-700">
+                        🆕 新品項
+                        {l.item.item_code
+                          ? `（自訂品號 ${l.item.item_code}）`
+                          : '（送出時自動編號）'}
+                      </span>
+                    ) : (
+                      <span className="font-mono text-xs text-slate-400">{l.item.item_code}</span>
+                    )}
                   </div>
                   <h3 className="mt-0.5 text-base font-extrabold leading-snug text-slate-900">
                     {l.item.item_name}
@@ -698,10 +781,14 @@ export default function ActionTab({
                   </h3>
                 </div>
                 <div className="flex shrink-0 items-baseline gap-2 text-sm font-bold">
-                  <span className="text-slate-500">
-                    {mode === 'COUNT' ? '盤後' : '在庫'}{' '}
-                    <b className="tabular-nums text-slate-800">{l.item.stock_qty}</b>
-                  </span>
+                  {l.item.__new ? (
+                    <span className="text-[11px] font-bold text-emerald-600">🆕 送出後自動建檔</span>
+                  ) : (
+                    <span className="text-slate-500">
+                      {mode === 'COUNT' ? '盤後' : '在庫'}{' '}
+                      <b className="tabular-nums text-slate-800">{l.item.stock_qty}</b>
+                    </span>
+                  )}
                   <button
                     onClick={() => removeLine(idx)}
                     aria-label="從清單刪除"
