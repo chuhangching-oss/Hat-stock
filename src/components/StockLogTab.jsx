@@ -32,6 +32,44 @@ function parseHM(ts) {
   return ''; // 解析失敗就不顯示時間
 }
 
+/** Timestamp → 可排序字串 'YYYY-MM-DD HH:mm:ss'（兩種格式皆可） */
+function tsKey(ts) {
+  const s = String(ts || '').trim();
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/);
+  if (m) return `${m[1]} ${m[2]}`;
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) {
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+  return '';
+}
+
+/** 從出庫備註萃取客戶名稱（兩種現場寫法）：
+ *  ①「VF出貨25頂 …」→ 名稱在「出貨」之前
+ *  ②「10/30出鎮群4頂」→ 名稱在「出」之後、數量之前
+ *  萃取後剔除誤抓字（貨/庫/群 等） */
+const CUST_STOPWORDS = new Set(['貨', '庫', '群', '入', '出', '完']);
+function extractRemarkCustomers(logs) {
+  const found = new Map();
+  (logs || []).forEach((l) => {
+    if (l.type !== '出庫') return;
+    const rm = String(l.remark || '');
+    let m;
+    const re1 = /([A-Za-z\u4e00-\u9fff]{1,10})出貨/g;
+    while ((m = re1.exec(rm))) {
+      const name = m[1];
+      if (name && !CUST_STOPWORDS.has(name)) found.set(name.toUpperCase(), name);
+    }
+    const re2 = /出([A-Za-z\u4e00-\u9fff]{1,10}?)(?=[0-9])/g;
+    while ((m = re2.exec(rm))) {
+      const name = m[1];
+      if (name && !CUST_STOPWORDS.has(name)) found.set(name.toUpperCase(), name);
+    }
+  });
+  return [...found.values()];
+}
+
 // 類型 chips 設定（異動記錄 Type 只會有三種值）
 const TYPE_TAGS = [
   { key: '全部', icon: '', color: 'bg-blue-700 text-white' },
@@ -57,10 +95,10 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
   const [type, setType] = useState('全部');
   const [period, setPeriod] = useState('全部');
   const [customer, setCustomer] = useState('全部');
-  const [customers, setCustomers] = useState([]); // 客戶清單（客戶篩選下拉用）
+  const [customers, setCustomers] = useState([]); // 客戶表＋歷史出貨單彙整（客戶篩選下拉用）
 
   // 客戶候選來源＝客戶清單（CUSTOMERS）＋歷史出貨單出現過的客戶（SHIPMENT_ORDERS）
-  // 任一來源讀不到不影响本頁；兩個都空 → 不顯示客戶下拉（用關鍵字搜備註）
+  // 任一來源讀不到不影響本頁
   useEffect(() => {
     let alive = true;
     Promise.allSettled([
@@ -85,6 +123,31 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
       alive = false;
     };
   }, []);
+
+  // 最終下拉選項＝客戶表＋出貨單客戶＋【從出庫備註自動萃取的客戶】（VF / 鎮群…）
+  const custOptions = useMemo(() => {
+    const byName = new Map(customers.map((c) => [c.customer_id, c]));
+    extractRemarkCustomers(logs).forEach((name) => {
+      const key = name.toUpperCase();
+      if (!byName.has(key)) byName.set(key, { customer_id: key, customer_name: name, country: '' });
+    });
+    return [...byName.values()].sort((a, b) => a.customer_name.localeCompare(b.customer_name, 'zh-Hant'));
+  }, [customers, logs]);
+
+  // ⏳ 排序修正：Google Sheets 會把 Timestamp 轉成日期型（字串變英文月份），
+  // 直接字串排序會把舊的排前面 → 一律解析成可排序鍵再由新到舊
+  const sortedLogs = useMemo(
+    () =>
+      [...logs].sort((a, b) => {
+        const ka = tsKey(a.timestamp);
+        const kb = tsKey(b.timestamp);
+        if (ka && kb) return String(kb).localeCompare(String(ka));
+        if (ka) return -1; // 解析失敗的排最後
+        if (kb) return 1;
+        return 0;
+      }),
+    [logs],
+  );
 
   if (!getGasUrl()) {
     return (
@@ -115,7 +178,7 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
   const filtered = useMemo(() => {
     const f = keyword.trim().toLowerCase();
     const cust = customer === '全部' ? '' : customer.trim().toLowerCase();
-    return logs.filter((l) => {
+    return sortedLogs.filter((l) => {
       if (type !== '全部' && l.type !== type) return false;
       const d = parseYMD(l.timestamp);
       if (range.from && d && d < range.from) return false;
@@ -132,7 +195,7 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
         .toLowerCase()
         .includes(f);
     });
-  }, [logs, type, range, keyword, customer]);
+  }, [sortedLogs, type, range, keyword, customer]);
 
   // 篩選範圍內合計（依正負值分加總；盤點 ± 都算進去）
   const sum = useMemo(() => {
@@ -194,15 +257,15 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}
         />
-        {/* 客戶篩選（客戶清單讀到才顯示） */}
-        {customers.length > 0 && (
+        {/* 客戶篩選（客戶表＋歷史出貨單＋備註自動萃取，有候選才顯示） */}
+        {custOptions.length > 0 && (
           <select
             className="field-input"
             value={customer}
             onChange={(e) => setCustomer(e.target.value)}
           >
-            <option value="全部">客戶：全部（{customers.length} 家）</option>
-            {customers.map((c) => (
+            <option value="全部">客戶：全部（{custOptions.length} 家）</option>
+            {custOptions.map((c) => (
               <option key={c.customer_id} value={c.customer_name}>
                 {c.customer_name}
                 {c.country ? `（${c.country}）` : ''}
@@ -224,7 +287,7 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
             </button>
           ))}
         </div>
-        {customers.length === 0 && (
+        {custOptions.length === 0 && (
           <p className="px-1 text-[10px] font-bold text-slate-400">
             💡 想用「客戶」篩選：先在「出庫出貨」分頁建立／出貨選客戶——出過貨的客戶會自動出現在篩選下拉
           </p>
