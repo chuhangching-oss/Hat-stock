@@ -282,6 +282,9 @@ function doPost(e) {
       case 'delete_shipment':
         data = deleteShipment_(req);
         break;
+      case 'correct_stock_log':
+        data = correctStockLog_(req);
+        break;
       case 'getSalesReport':
       case 'get_sales_report':
         data = getSalesReport_(req);
@@ -331,7 +334,7 @@ function doPost(e) {
             'list_work_orders', 'list_bom', 'create_work_order', 'complete_work_order',
             'ship_work_order', 'list_customers', 'add_customer', 'create_shipment',
             'list_shipments', 'get_shipment', 'update_shipment', 'delete_shipment',
-            'getSalesReport', 'batchStockTransaction',
+            'correct_stock_log', 'getSalesReport', 'batchStockTransaction',
             'update_item_info', 'public_lookbook', 'list_yarn', 'save_yarn',
             'list_production_orders', 'create_production_order', 'start_production_order',
             'complete_production_order', 'ship_production_order', 'list_stock_logs',
@@ -1863,6 +1866,109 @@ function deleteShipment_(req) {
       shipment_id: shipmentId,
       returned: returned,
       restored_count: returned.length,
+    };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
+}
+
+/**
+ * 🔧 HC 限定：刪改出入庫紀錄（備註式出庫等非正式單的補救）
+ * req = { action:'correct_stock_log', log_id, operator,
+ *         new_qty?: 新的異動數量（簽號：出庫負／入庫正）← 給了就是「修改」
+ *         delete?: true                                        ← 「刪除整列」 }
+ * - 入庫／出庫列：修改＝庫存加（新−舊）差額；刪除＝庫存反轉原數量（扣過的還回來）
+ * - 盤點列：只允許刪除（還原到盤點前那一瞬的庫存＝現值−當時差額，期間若有其他異動會失準）
+ * - 任何操作皆另寫一筆 type=「更正」稽核紀錄（change=0，不改庫存，僅留痕）
+ * 回傳 { corrected, log_id, item_code, old_change, new_change, deleted, item }
+ */
+function correctStockLog_(req) {
+  checkShipmentAdmin_(req.operator);
+  var logId = String(req.log_id || '').trim();
+  if (!logId) throw new Error('缺少 log_id');
+  var doDelete = !!req.delete;
+  var hasNew = req.new_qty !== undefined && req.new_qty !== null && String(req.new_qty).trim() !== '';
+  var newQty = hasNew ? Number(req.new_qty) : null;
+  if (doDelete && hasNew) throw new Error('delete 與 new_qty 只能二選一');
+  if (!doDelete && (!hasNew || isNaN(newQty))) throw new Error('請提供 new_qty（新異動數量）或 delete:true');
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    // ① 在最近 2000 筆內定位 Log_ID
+    var logSheet = getSheet_(SHEET_LOG);
+    var last = logSheet.getLastRow();
+    if (last < 2) throw new Error('STOCK_LOG 沒有任何紀錄');
+    var startRow = Math.max(2, last - 1999);
+    var num = last - startRow + 1;
+    var values = logSheet.getRange(startRow, 1, num, LOG_HEADERS.length).getValues();
+    var rowIdx = -1; // 0-based（values 內）
+    for (var i = 0; i < values.length; i++) {
+      if (String(values[i][0]).trim() === logId) { rowIdx = i; break; }
+    }
+    if (rowIdx === -1) throw new Error('最近 2000 筆內找不到紀錄 ' + logId + '（更舊的請直接在工作表處理）');
+    var sheetRow = startRow + rowIdx; // 1-based 試算表列號
+    var rType = String(values[rowIdx][2]).trim();
+    var rCode = String(values[rowIdx][3]).trim();
+    var rOld = Number(values[rowIdx][4]) || 0;
+    var rOperator = String(values[rowIdx][5]).trim() || '—';
+    var rRemark = String(values[rowIdx][6]).trim();
+
+    // ② 操作限制
+    if (['入庫', '出庫', '盤點'].indexOf(rType) === -1) {
+      throw new Error('此紀錄類型不可刪改：' + rType);
+    }
+    if (rType === '盤點') {
+      if (hasNew) throw new Error('盤點列不可修改數量——請先刪除此列再重新盤點校正');
+      // 刪除 OK（下方統一走刪除流程）
+    }
+    if (!doDelete && rType !== '入庫' && rType !== '出庫') {
+      throw new Error('只有入庫／出庫列可以修改數量');
+    }
+
+    // ③ 庫存隨動：刪除 → 現值 − 原量；修改 → 現值 +（新 − 舊）
+    var item = null;
+    var stockAfter = null;
+    var stockDelta = doDelete ? -rOld : (newQty - rOld);
+    if (rCode) {
+      var master = getSheet_(SHEET_MASTER);
+      var mv = master.getDataRange().getValues();
+      for (var m = 1; m < mv.length; m++) {
+        if (String(mv[m][0]).trim().toUpperCase() !== rCode.toUpperCase()) continue;
+        stockAfter = round4_((Number(mv[m][4]) || 0) + stockDelta);
+        master.getRange(m + 1, 5).setValue(stockAfter);
+        master.getRange(m + 1, 8).setValue(now_());
+        item = rowToItem_(mv[m]);
+        item.stock_qty = stockAfter;
+        break;
+      }
+    }
+
+    // ④ 原列處理：修改 → 覆寫數量＋備註標更正；刪除 → 整列移除
+    if (doDelete) {
+      logSheet.deleteRow(sheetRow);
+    } else {
+      var correctedRemark = rRemark + (rRemark ? '；' : '') + '更正 ' + rOld + '→' + newQty + '（' + (String(req.operator || '').trim() || 'HC') + '）';
+      logSheet.getRange(sheetRow, 5).setValue(newQty);
+      logSheet.getRange(sheetRow, 7).setValue(correctedRemark);
+    }
+
+    // ⑤ 稽核紀錄（type=更正，change=0，不影響庫存）
+    var auditId = 'L' + Utilities.formatDate(new Date(), nowTz_(), 'yyyyMMddHHmmss') +
+      ('000' + Math.floor(Math.random() * 1000)).slice(-3);
+    var hcOp = String(req.operator || '').trim() || 'HC';
+    var detail = '更正紀錄 ' + logId + '（' + rType + ' ' + rCode + '，原經辦 ' + rOperator + '）：' +
+      (doDelete ? '刪除整列（庫存 ' + (rOld >= 0 ? '−' : '+') + Math.abs(rOld) : '異動量 ' + rOld + '→' + newQty);
+    logSheet.appendRow([auditId, now_(), '更正', rCode, 0, hcOp, detail]);
+
+    return {
+      corrected: true,
+      log_id: logId,
+      item_code: rCode,
+      old_change: rOld,
+      new_change: doDelete ? null : newQty,
+      deleted: doDelete,
+      item: item || undefined,
     };
   } finally {
     try { lock.releaseLock(); } catch (e) { /* ignore */ }

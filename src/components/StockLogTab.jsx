@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { gasRequest, getGasUrl } from '../api';
+import { gasRequest, getGasUrl, getOperator, isManager } from '../api';
 import { WO_STATUS_COLORS } from '../constants';
 
 function fmtQty(n) {
@@ -129,12 +129,18 @@ function rowQtyForCustomer(l, name) {
  * - 頂部統計：篩選範圍內的入庫 / 出庫合計件數
  * - 資料為最近 1000 筆（更舊的請直接看 Google 試算表 STOCK_LOG）
  */
-export default function StockLogTab({ logs, loading, error, refresh, showToast }) {
+export default function StockLogTab({ logs, loading, error, refresh, showToast, onItemsUpdated }) {
   const [keyword, setKeyword] = useState('');
   const [type, setType] = useState('全部');
   const [period, setPeriod] = useState('全部');
   const [customer, setCustomer] = useState('全部');
   const [customers, setCustomers] = useState([]); // 客戶表＋歷史出貨單彙整（客戶篩選下拉用）
+  // 🔧 HC 限定：刪改出入庫紀錄（備註式出庫補救）
+  const manager = isManager();
+  const [editLog, setEditLog] = useState(null);   // 正在編輯的紀錄列
+  const [editQty, setEditQty] = useState('');     // 新異動量（簽號：出庫負／入庫正）
+  const [editDelArm, setEditDelArm] = useState(false); // 刪除兩段式保險
+  const [editBusy, setEditBusy] = useState(false);
 
   // 客戶候選來源＝客戶清單（CUSTOMERS）＋歷史出貨單出現過的客戶（SHIPMENT_ORDERS）
   // 任一來源讀不到不影響本頁
@@ -196,6 +202,43 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
         <p className="mt-2 text-slate-500">請先到「設定」分頁貼上 Apps Script 網址。</p>
       </div>
     );
+  }
+
+  // 🔧 HC：刪改紀錄（correct_stock_log）
+  function openEdit(l) {
+    setEditLog(l);
+    setEditQty(String(l.change_qty ?? ''));
+    setEditDelArm(false);
+  }
+
+  async function handleEditSubmit() {
+    if (!editLog || editBusy) return;
+    const willDelete = editDelArm;
+    const oldQ = Number(editLog.change_qty) || 0;
+    if (!willDelete) {
+      const nq = Number(editQty);
+      if (!isFinite(nq)) return showToast('❌ 異動量請填數字（出庫負數／入庫正數）', 'error');
+      if (nq === oldQ) return showToast('⚠️ 數量沒有變更', 'error');
+    }
+    setEditBusy(true);
+    try {
+      const payload = { action: 'correct_stock_log', log_id: editLog.log_id, operator: getOperator() };
+      if (willDelete) payload.delete = true;
+      else payload.new_qty = Number(editQty);
+      const res = await gasRequest(getGasUrl(), payload);
+      if (res.item && onItemsUpdated) onItemsUpdated(res.item);
+      showToast(
+        willDelete
+          ? `🗑 已刪除紀錄 ${editLog.log_id}：庫存已回補`
+          : `✅ 已修正 ${editLog.item_code}：${editLog.change_qty} → ${res.new_change}，庫存已同步`,
+      );
+      setEditBusy(false);
+      setEditLog(null);
+      refresh();
+    } catch (e) {
+      setEditBusy(false);
+      showToast(`❌ 修正失敗：${e.message}`, 'error');
+    }
   }
 
   /** 日期範圍（含起訖）：{ from:'YYYY-MM-DD'|'', to:'' }，'' = 不限 */
@@ -374,7 +417,7 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
               const q = l.custQty != null ? l.custQty : Number(l.change_qty) || 0;
               const plus = q > 0;
               const typeCls =
-                l.type === '入庫' ? WO_STATUS_COLORS['已入庫'] : l.type === '盤點' ? WO_STATUS_COLORS['待確認'] : l.type === '回補' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700';
+                l.type === '入庫' ? WO_STATUS_COLORS['已入庫'] : l.type === '盤點' ? WO_STATUS_COLORS['待確認'] : l.type === '回補' ? 'bg-emerald-100 text-emerald-700' : l.type === '更正' ? 'bg-slate-200 text-slate-600' : 'bg-red-100 text-red-700';
               return (
                 <li key={l.log_id} className="flex items-start gap-3 px-4 py-2.5">
                   <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-extrabold ${typeCls}`}>
@@ -397,6 +440,15 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
                       </p>
                     )}
                   </div>
+                  {manager && l.type !== '更正' && (
+                    <button
+                      onClick={() => openEdit(l)}
+                      aria-label="刪改此紀錄（HC）"
+                      className="shrink-0 rounded-xl bg-amber-100 px-2 py-1.5 text-xs font-extrabold text-amber-700 transition active:bg-amber-200 active:scale-95"
+                    >
+                      ✏️
+                    </button>
+                  )}
                   <span
                     className={`shrink-0 text-base font-black tabular-nums ${
                       plus ? 'text-emerald-600' : 'text-red-600'
@@ -415,6 +467,88 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
       {!loading && filtered.length === 0 && error === '' && (
         <div className="rounded-3xl bg-white p-6 text-center text-sm font-bold text-slate-400 shadow-card">
           此篩選條件下沒有任何異動記錄
+        </div>
+      )}
+
+      {/* ===== HC 刪改紀錄彈窗 ===== */}
+      {editLog && (
+        <div
+          className="fixed inset-0 z-30 flex items-end justify-center bg-black/50 p-4 sm:items-center"
+          onClick={() => !editBusy && setEditLog(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-3xl bg-white shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 p-4 pb-3">
+              <h3 className="text-lg font-extrabold">🔧 刪改紀錄（HC）</h3>
+              <button className="text-slate-400" onClick={() => !editBusy && setEditLog(null)}>✕</button>
+            </div>
+
+            <div className="space-y-3 p-4">
+              <div className="space-y-1 rounded-2xl bg-slate-50 p-3 text-sm">
+                <p className="font-extrabold text-slate-800">
+                  {editLog.item_name}
+                  {editLog.color_spec ? `（${editLog.color_spec}）` : ''}
+                </p>
+                <p className="font-mono text-[11px] text-slate-400">
+                  {editLog.log_id} · {editLog.item_code} · {parseYMD(editLog.timestamp)} {parseHM(editLog.timestamp)} · 原經辦 {editLog.operator || '—'}
+                </p>
+                {editLog.remark && <p className="truncate text-[11px] font-bold text-slate-500">📝 {editLog.remark}</p>}
+              </div>
+
+              {editLog.type === '盤點' ? (
+                <p className="rounded-2xl bg-amber-50 px-3 py-2 text-xs font-bold leading-snug text-amber-800 ring-1 ring-amber-200">
+                  🧮 盤點列不可改數量——如要取消這次盤點，刪除整列即可（庫存還原到盤點當時的值）
+                </p>
+              ) : (
+                <div>
+                  <label className="field-label">異動數量（出庫＝負數 −n，入庫＝正數 +n）</label>
+                  <input
+                    className="field-input tabular-nums text-right text-lg font-black"
+                    type="number"
+                    inputMode="number"
+                    value={editQty}
+                    onChange={(e) => {
+                      setEditQty(e.target.value);
+                      setEditDelArm(false); // 改回修改模式就解除刪除保險
+                    }}
+                  />
+                  <p className="mt-1 px-1 text-[10px] font-bold text-slate-400">
+                    儲存後庫存會自動加（新−舊）差額；例：原紀錄 −17 改成 −12 → 庫存回補 5
+                  </p>
+                </div>
+              )}
+
+              <button
+                className="btn-primary"
+                disabled={editBusy || (!editDelArm && editLog.type === '盤點')}
+                onClick={handleEditSubmit}
+              >
+                {editBusy ? '處理中…' : editDelArm ? '⚠️ 確認刪除整列（庫存回補）' : '💾 儲存修改'}
+              </button>
+
+              {editLog.type !== '更正' && (
+                <>
+                  <button
+                    className={`min-h-touch w-full rounded-2xl py-2.5 text-sm font-extrabold transition active:scale-[0.98] ${
+                      editDelArm ? 'bg-red-600 text-white' : 'bg-red-100 text-red-600'
+                    }`}
+                    disabled={editBusy}
+                    onClick={() => {
+                      if (!editDelArm) return setEditDelArm(true);
+                      handleEditSubmit();
+                    }}
+                  >
+                    {editDelArm ? '⚠️ 再按一次＝真的刪除整列（庫存回補）' : '🗑 刪除整列（庫存回補）'}
+                  </button>
+                  <p className="px-1 text-[10px] font-bold text-slate-400">
+                    刪除＝這筆異動作廢：扣過的庫存會還回來；同時會自動寫一筆「更正」稽核紀錄留痕
+                  </p>
+                </>
+              )}
+            </div>
+          </div>
         </div>
       )}
 

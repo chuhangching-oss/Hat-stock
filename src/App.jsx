@@ -398,6 +398,7 @@ export default function App() {
             error={logs.error}
             refresh={logs.refresh}
             showToast={showToast}
+            onItemsUpdated={(it) => inventory.applyItem(it)}
           />
         )}
         {tab === 'book' && (
