@@ -6,11 +6,14 @@ import { CATEGORY_COLORS } from '../constants';
  * - 搜尋（帽型/品號/顏色）＋ 類別快速篩選（全部/成品/半成品/原料）
  * - 列表：☑ 核取＋品號/帽型＋顏色＋在庫量＋「本次數量」輸入框
  *   * 勾選該列 → 數量框自動啟用並聚焦，可由上往下連續填數量
- *   * 無庫存（≤0）品項 disabled；「全選」只選有庫存的列
- * - 底部統計：已選 X 款，共 Y 件；【整批帶入出庫明細】一次推入（onPick 回呼）
- *   * 送出前驗證：勾選列數量都必須 >0 且不超過在庫（紅字提示、阻擋送出）
+ *   * 出庫模式（OUT）：無庫存（≤0）品項 disabled；「全選」只選有庫存的列
+ *   * 入庫（IN）/盤點（COUNT）模式：無庫存品項【可以勾選】——入庫的品項
+ *     本來就可能目前庫存 0；盤點則是要把實際數量填回去
+ * - 底部統計：已選 X 款，共 Y 件；【整批帶入明細】一次推入（onPick 回呼）
+ *   * 送出前驗證：出庫數量需 >0 且不超過在庫；入庫需 >0；盤點可 ≥0（紅字提示）
  */
-export default function BatchItemPicker({ open, items, showToast, onClose, onPick }) {
+export default function BatchItemPicker({ open, mode = 'OUT', items, showToast, onClose, onPick }) {
+  const outOnly = mode === 'OUT'; // 僅出庫需要「不得超過在庫」的限制
   const [filter, setFilter] = useState('');
   const [category, setCategory] = useState('全部');
   const [sel, setSel] = useState({}); // { item_code: 'qty 字串' }
@@ -45,14 +48,19 @@ export default function BatchItemPicker({ open, items, showToast, onClose, onPic
   );
   const validQty = (code) => {
     const it = shownStock.get(code);
-    const q = Number(sel[code]);
-    return !!it && isFinite(q) && q > 0 && q <= (it.stock_qty || 0);
+    const s = String(sel[code] ?? '').trim();
+    if (s === '' || !it) return false; // 空白＝還沒填數量
+    const q = Number(s);
+    if (!isFinite(q)) return false;
+    if (mode === 'COUNT') return q >= 0; // 盤點：盤後可為 0
+    if (!(q > 0)) return false; // 入庫/出庫：異動量必須 > 0
+    return !outOnly || q <= (it.stock_qty || 0); // 僅出庫檢查在庫上限
   };
   const validCount = checkedCodes.filter(validQty).length;
   const validQtyTotal = checkedCodes.reduce((s, c) => s + (validQty(c) ? Number(sel[c]) : 0), 0);
 
   function toggle(code, item) {
-    if ((item.stock_qty || 0) <= 0) return; // 無庫存不可勾
+    if (outOnly && (item.stock_qty || 0) <= 0) return; // 僅出庫：無庫存不可勾
     setSel((prev) => {
       const next = { ...prev };
       if (next[code] !== undefined) {
@@ -66,9 +74,9 @@ export default function BatchItemPicker({ open, items, showToast, onClose, onPic
     setTimeout(() => qtyRefs.current[code] && qtyRefs.current[code].focus(), 30);
   }
 
-  /** 全選／全取消（無庫存的列不勾） */
+  /** 全選／全取消（出庫模式跳過無庫存的列；入庫/盤點包含無庫存列） */
   function toggleAll() {
-    const visibleOk = visible.filter((it) => (it.stock_qty || 0) > 0);
+    const visibleOk = outOnly ? visible.filter((it) => (it.stock_qty || 0) > 0) : visible;
     const allChecked =
       visibleOk.length > 0 && visibleOk.every((it) => sel[it.item_code] !== undefined);
     setSel((prev) => {
@@ -88,13 +96,22 @@ export default function BatchItemPicker({ open, items, showToast, onClose, onPic
     const list = [];
     for (const it of filtered) {
       if (sel[it.item_code] === undefined) continue;
-      const q = Number(sel[it.item_code]);
-      if (!(q > 0)) continue;
-      if (q > (it.stock_qty || 0)) {
-        return showToast(
-          `❌ ${it.item_name}${it.color_spec ? `（${it.color_spec}）` : ''} 數量 ${q} 超過在庫 ${it.stock_qty}，請修正`,
-          'error',
-        );
+      const s = String(sel[it.item_code]).trim();
+      if (s === '') continue;
+      const q = Number(s);
+      if (!isFinite(q)) continue;
+      if (mode === 'COUNT') {
+        if (q < 0) {
+          return showToast(`❌ ${it.item_name}${it.color_spec ? `（${it.color_spec}）` : ''} 盤後數量不可為負數`, 'error');
+        }
+      } else {
+        if (!(q > 0)) continue;
+        if (outOnly && q > (it.stock_qty || 0)) {
+          return showToast(
+            `❌ ${it.item_name}${it.color_spec ? `（${it.color_spec}）` : ''} 數量 ${q} 超過在庫 ${it.stock_qty}，請修正`,
+            'error',
+          );
+        }
       }
       list.push({ item: it, qty: q });
     }
@@ -103,7 +120,7 @@ export default function BatchItemPicker({ open, items, showToast, onClose, onPic
       return showToast(
         checkedCodes.length === 0
           ? '❌ 請先勾選品項'
-          : '⚠️ 尚有勾選品項未填數量（已略過未填的列）',
+          : `⚠️ 尚有勾選品項未填${mode === 'COUNT' ? '盤後' : ''}數量（已略過未填的列）`,
         'error',
       );
     }
@@ -164,6 +181,13 @@ export default function BatchItemPicker({ open, items, showToast, onClose, onPic
               ☑️ 全選
             </button>
           </div>
+          {mode !== 'OUT' && (
+            <p className="px-1 text-[10px] font-extrabold text-emerald-600">
+              {mode === 'IN'
+                ? '📥 入庫模式：無庫存（0）的品項也可以勾選入庫'
+                : '🧮 盤點模式：全部品項可勾選，盤後數量可填 0'}
+            </p>
+          )}
         </div>
 
         {/* 品項勾選清單 */}
@@ -173,22 +197,22 @@ export default function BatchItemPicker({ open, items, showToast, onClose, onPic
               const checked = sel[it.item_code] !== undefined;
               const noStock = (it.stock_qty || 0) <= 0;
               const q = checked ? Number(sel[it.item_code]) : NaN;
-              const over = checked && isFinite(q) && q > (it.stock_qty || 0);
+              const over = outOnly && checked && isFinite(q) && q > (it.stock_qty || 0);
               return (
                 <li
                   key={it.item_code}
-                  className={`flex items-start gap-2.5 py-2.5 ${noStock ? 'opacity-40' : ''}`}
+                  className={`flex items-start gap-2.5 py-2.5 ${outOnly && noStock ? 'opacity-40' : ''}`}
                 >
                   <input
                     type="checkbox"
                     checked={checked}
-                    disabled={noStock}
+                    disabled={outOnly && noStock}
                     onChange={() => toggle(it.item_code, it)}
                     className="mt-1.5 h-6 w-6 shrink-0 accent-blue-700"
                   />
                   <div
                     className="min-w-0 flex-1 cursor-pointer"
-                    onClick={() => !noStock && toggle(it.item_code, it)}
+                    onClick={() => !(outOnly && noStock) && toggle(it.item_code, it)}
                   >
                     <span
                       className={`mr-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
@@ -202,7 +226,7 @@ export default function BatchItemPicker({ open, items, showToast, onClose, onPic
                     <span className="block font-mono text-[11px] text-slate-400">{it.item_code}</span>
                     <span className={`text-xs font-bold ${it.stock_qty <= 10 ? 'text-red-600' : 'text-slate-600'}`}>
                       在庫 <b className="tabular-nums">{it.stock_qty}</b> {it.unit}
-                      {noStock && '（無庫存）'}
+                      {noStock && `（${mode === 'COUNT' ? '帳面 0，可填盤後數' : mode === 'IN' ? '可入庫' : '無庫存'}）`}
                     </span>
                   </div>
                   <div className="flex shrink-0 items-center gap-1" onClick={(e) => e.stopPropagation()}>
@@ -248,7 +272,7 @@ export default function BatchItemPicker({ open, items, showToast, onClose, onPic
               已選 <b className="text-lg text-blue-700">{validCount}</b> 款
               {checkedCodes.length > validCount && (
                 <span className="ml-1 text-xs font-bold text-red-500">
-                  （{checkedCodes.length - validCount} 款未填／超庫存）
+                  （{checkedCodes.length - validCount} 款未填{outOnly ? '／超庫存' : ''}）
                 </span>
               )}
             </span>
@@ -261,7 +285,7 @@ export default function BatchItemPicker({ open, items, showToast, onClose, onPic
             onClick={handleImport}
             disabled={validCount === 0}
           >
-            整批帶入出庫明細（{validCount} 款 / {validQtyTotal} 件）
+            整批帶入{mode === 'IN' ? '入庫' : mode === 'COUNT' ? '盤點' : '出庫'}明細（{validCount} 款 / {validQtyTotal} 件）
           </button>
         </div>
       </div>

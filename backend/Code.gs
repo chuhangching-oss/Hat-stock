@@ -150,6 +150,61 @@ var ALLOWED_MANAGERS = ['HC', 'MAIN'];
 var VALID_TYPES = ['入庫', '出庫', '盤點'];
 
 /* ============================================================
+ * 🧵 V2：紗線庫存（YARN_INVENTORY）＋ 新版工作令（PRODUCTION_ORDERS）
+ * ------------------------------------------------------------
+ * 依紙本《盛全工業 工作令》格式升級（舊 WORK_ORDERS 保留不動）：
+ * - YARN_INVENTORY      紗線庫存（Yarn_Code/Yarn_Name/Color/Stock_KG/Safety_Stock/Last_Updated）
+ * - PRODUCTION_ORDERS   新版工作令主表：單頭（編號#G / 客戶 / 型號 / 總計 / 完成日期）
+ *                       ＋ 五色配色（Color_A~E × Qty_A~E，顏色稱呼以頭頂顏色為準）
+ *                       ＋ 工序三段（定型 / 平車 / 包裝）
+ *                       ＋ Destination（入倉庫備庫｜訂單出貨）＋ Status ＋ Actual_Good_Qty
+ * - WO_YARN             工單領紗明細（單頂用紗量 × Total_KG、來源、是否已扣）
+ * 扣紗邏輯：開立工單（或草稿）切換至「生產中」時，依
+ *   需求KG = (BOM 紗線列 ＋ 開單手動指定) 合併之單頂用紗量 × Plan_Qty
+ *   自動扣減 YARN_INVENTORY.Stock_KG（不足仍照扣形成負庫存供現場檢討）。
+ * 完工時「不重複扣」紗線；BOM 內非紗線原料仍可於完工時扣（use_bom）。
+ * ============================================================ */
+var SHEET_YARN = 'YARN_INVENTORY'; // 紗線庫存
+var YARN_HEADERS = ['Yarn_Code', 'Yarn_Name', 'Color', 'Stock_KG', 'Safety_Stock', 'Last_Updated'];
+
+var SHEET_PWO = 'PRODUCTION_ORDERS'; // 新版工作令主表（工作令 V2）
+var PWO_HEADERS = [
+  'WO_ID',            // 工單編號（紙本「編號：#G22015」；留空自動延續 #G 序列，也可手動輸入）
+  'Customer',         // 客戶（紙本「客戶：SZ」）
+  'Style_No',         // 型號（紙本「型號：D1177WB/6142」）
+  'Plan_Qty',         // 預計產量（紙本「總計：312頂」；單位 = 頂）
+  'Due_Date',         // 預計交期（紙本「完成日期：3/30」；YYYY-MM-DD）
+  'Color_A', 'Color_B', 'Color_C', 'Color_D', 'Color_E', // 五色配色（顏色稱呼以頭頂顏色為準）
+  'Qty_A', 'Qty_B', 'Qty_C', 'Qty_D', 'Qty_E',           // 該組配色數量（頂）
+  'Process_Setting',  // 定型工序備註（理毛／定型模／硬度／邊留…）
+  'Process_Sewing',   // 平車工序備註（汗帶／洗標…）
+  'Process_Packing',  // 包裝工序備註（箱裝／吊牌／素體…）
+  'Destination',      // 流向：入倉庫備庫 | 訂單出貨
+  'Order_Ref',        // 訂單／客戶單號（選填）
+  'Status',           // 草稿｜生產中｜待確認｜已入庫｜待出貨｜已出貨
+  'Actual_Good_Qty',  // 實際完工良品數
+  'Confirmed_Operator', // 完工經辦
+  'Completed_Time',   // 完工時間
+  'Remark',           // 備註
+];
+
+var SHEET_PWO_YARN = 'WO_YARN'; // 工單領紗明細（扣紗依據＋領料紀錄）
+var PWO_YARN_HEADERS = [
+  'WO_ID', 'Yarn_Code', 'Yarn_Name', 'KG_Per_Unit', 'Total_KG',
+  'Source',           // BOM（來自 BOM_MASTER）| MANUAL（開單直接指定）| BOM+MANUAL
+  'Deducted',         // N = 預估需求（未扣）｜ Y = 已於投產時扣減
+  'Deducted_Time',
+];
+
+var PWO_DESTS = ['入倉庫備庫', '訂單出貨'];
+var PWO_STATUS_DRAFT = '草稿';
+var PWO_STATUS_ACTIVE = '生產中';
+var PWO_STATUS_CHECK = '待確認';
+var PWO_STATUS_IN = '已入庫';
+var PWO_STATUS_TOSHIP = '待出貨';
+var PWO_STATUS_SHIPPED = '已出貨';
+
+/* ============================================================
  * 🔐 存取碼（建議設定！）
  * ------------------------------------------------------------
  * 留空   = 不驗證（完全公開，知道網址就能用）
@@ -225,6 +280,28 @@ function doPost(e) {
         break;
       case 'public_lookbook':
         data = getPublicLookbook_();
+        break;
+      /* ---- V2：紗線庫存 ＋ 新版工作令（接續紙本「工作令」） ---- */
+      case 'list_yarn':
+        data = listYarn_();
+        break;
+      case 'save_yarn':
+        data = saveYarn_(req);
+        break;
+      case 'list_production_orders':
+        data = listProductionOrders_();
+        break;
+      case 'create_production_order':
+        data = createProductionOrder_(req);
+        break;
+      case 'start_production_order':
+        data = startProductionOrder_(req);
+        break;
+      case 'complete_production_order':
+        data = completeProductionOrder_(req);
+        break;
+      case 'ship_production_order':
+        data = shipProductionOrder_(req);
         break;
       default:
         throw new Error('未知的 action：' + req.action + '（可用：ping / list / get / log / upload_photo）');
@@ -978,6 +1055,27 @@ function checkDueWorkOrders() {
     changed++;
   }
   Logger.log('工作令到期檢查完成：%s 張轉為「待確認」', changed);
+
+  // V2：新版工作令（PRODUCTION_ORDERS）逾期檢查（同一觸發器一次做完）
+  changed += checkDuePWOs_(todayYMD);
+  Logger.log('新版工作令到期檢查完成（累計 %s 張轉為「待確認」）', changed);
+}
+
+/** V2：新版工作令到期檢查——Due_Date 已過且「生產中」→ 自動改「待確認」，回傳筆數 */
+function checkDuePWOs_(todayYMD) {
+  var sheet = getSheet_(SHEET_PWO);
+  var last = sheet.getLastRow();
+  if (last < 2) return 0;
+  var values = sheet.getRange(2, 1, last - 1, PWO_HEADERS.length).getValues();
+  var changed = 0;
+  for (var i = 0; i < values.length; i++) {
+    if (String(values[i][20]).trim() !== PWO_STATUS_ACTIVE) continue; // 第 21 欄 Status
+    var due = dueYMD_(values[i][4]);                                  // 第 5 欄 Due_Date
+    if (!due || due >= todayYMD) continue;
+    sheet.getRange(i + 2, 21).setValue(PWO_STATUS_CHECK);
+    changed++;
+  }
+  return changed;
 }
 
 /** 安裝每日到期檢查觸發器（重複執行會先移除舊觸發器再重裝） */
@@ -1589,6 +1687,9 @@ function setupSheets() {
   Logger.log('建立 %s …', ensureSheet_(SHEET_CUST));
   Logger.log('建立 %s …', ensureSheet_(SHEET_SHP));
   Logger.log('建立 %s …', ensureSheet_(SHEET_SHPD));
+  Logger.log('建立 %s …', ensureSheet_(SHEET_YARN));     // V2 紗線庫存
+  Logger.log('建立 %s …', ensureSheet_(SHEET_PWO));      // V2 新版工作令
+  Logger.log('建立 %s …', ensureSheet_(SHEET_PWO_YARN)); // V2 工單領紗明細
   installDueCheckTrigger();
   Logger.log('完成！接著執行 seedDemoData() 可灌入示範料件（現有資料不會被覆蓋）');
 }
@@ -1603,6 +1704,9 @@ function ensureSheet_(name) {
               : (name === SHEET_CUST) ? CUST_HEADERS
               : (name === SHEET_SHP) ? SHP_HEADERS
               : (name === SHEET_SHPD) ? SHPD_HEADERS
+              : (name === SHEET_YARN) ? YARN_HEADERS
+              : (name === SHEET_PWO) ? PWO_HEADERS
+              : (name === SHEET_PWO_YARN) ? PWO_YARN_HEADERS
               : LOG_HEADERS;
   if (!sheet) {
     // 全新建表：一次寫入所有標題
@@ -1658,4 +1762,606 @@ function seedDemoBom() {
     sheet.appendRow(demo[i]);
   }
   Logger.log('示範 BOM 完成：%s 列', demo.length);
+}
+
+/* ============================================================
+ * 🧵 V2：紗線庫存（YARN_INVENTORY）
+ * ============================================================ */
+
+/** 紗線清單（依 Yarn_Code 排序） */
+function listYarn_() {
+  var sheet = getSheet_(SHEET_YARN);
+  var values = sheet.getDataRange().getValues();
+  var rows = [];
+  for (var i = 1; i < values.length; i++) {
+    if (String(values[i][0]).trim() === '') continue;
+    rows.push(rowToYarn_(values[i]));
+  }
+  rows.sort(function (a, b) { return String(a.yarn_code).localeCompare(String(b.yarn_code)); });
+  return rows;
+}
+
+/** 紗線一列 → 前端資料物件 */
+function rowToYarn_(row) {
+  return {
+    yarn_code: String(row[0]).trim(),
+    yarn_name: String(row[1]).trim(),
+    color: String(row[2]).trim(),
+    stock_kg: Number(row[3]) || 0,
+    safety_stock: Number(row[4]) || 0,
+    last_updated: String(row[5] || '').trim(),
+  };
+}
+
+/** 紗線自動編號：Y####（既有最大序號 + 1） */
+function nextYarnCode_(sheet) {
+  var last = sheet.getLastRow();
+  var max = 0;
+  if (last >= 2) {
+    var codes = sheet.getRange(2, 1, last - 1, 1).getValues();
+    for (var i = 0; i < codes.length; i++) {
+      var m = String(codes[i][0]).trim().toUpperCase().match(/^Y(\d+)$/);
+      if (m) max = Math.max(max, parseInt(m[1], 10));
+    }
+  }
+  return 'Y' + ('000' + (max + 1)).slice(-3);
+}
+
+/** 依紗線代碼（不分大小寫）找列號；找不到回 -1 */
+function findYarnRow_(sheet, code) {
+  if (!code) return -1;
+  var target = String(code).trim().toUpperCase();
+  var last = sheet.getLastRow();
+  if (last < 2) return -1;
+  var codes = sheet.getRange(2, 1, last - 1, 1).getValues();
+  for (var i = 0; i < codes.length; i++) {
+    if (String(codes[i][0]).trim().toUpperCase() === target) return i + 2;
+  }
+  return -1;
+}
+
+/**
+ * 新增／更新紗線（upsert）：
+ * req = { yarn_code?(留空自動 Y####), yarn_name(必填), color?,
+ *         stock_kg?, safety_stock? }（stock_kg = 直接設定為現有庫存量）
+ * 已存在的 yarn_code 只會更新有提供 Stock_KG / Safety_Stock 的欄位。
+ */
+function saveYarn_(req) {
+  var name = String(req.yarn_name || '').trim();
+  if (!name) throw new Error('缺少紗名 Yarn_Name');
+  var color = String(req.color || '').trim();
+  var hasStock = req.stock_kg !== undefined && req.stock_kg !== null && String(req.stock_kg).trim() !== '';
+  var stock = hasStock ? Number(req.stock_kg) : null;
+  if (hasStock && (isNaN(stock) || stock < 0)) {
+    throw new Error('Stock_KG 格式錯誤（不可為負數）：' + req.stock_kg);
+  }
+  var hasSafety = req.safety_stock !== undefined && req.safety_stock !== null && String(req.safety_stock).trim() !== '';
+  var safety = hasSafety ? Number(req.safety_stock) : null;
+  if (hasSafety && (isNaN(safety) || safety < 0)) {
+    throw new Error('Safety_Stock 格式錯誤（不可為負數）：' + req.safety_stock);
+  }
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var sheet = getSheet_(SHEET_YARN);
+    var code = String(req.yarn_code || '').trim().replace(/^#/, '').toUpperCase();
+    var row = code ? findYarnRow_(sheet, code) : -1;
+    if (row === -1) {
+      // 新建：無碼自動編號（自訂碼需不存在於檔內）
+      if (!code) code = nextYarnCode_(sheet);
+      row = sheet.getLastRow() + 1;
+      sheet.getRange(row, 1, 1, YARN_HEADERS.length).setValues([[
+        code, name, color,
+        stock !== null ? stock : 0,
+        safety !== null ? safety : 0,
+        now_(),
+      ]]);
+    } else {
+      if (stock !== null) sheet.getRange(row, 4).setValue(stock);
+      if (safety !== null) sheet.getRange(row, 5).setValue(safety);
+      sheet.getRange(row, 2).setValue(name);
+      if (color) sheet.getRange(row, 3).setValue(color);
+      sheet.getRange(row, 6).setValue(now_());
+    }
+    return { yarn: rowToYarn_(sheet.getRange(row, 1, 1, YARN_HEADERS.length).getValues()[0]) };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
+}
+
+/* ============================================================
+ * 🧵 V2：新版工作令（PRODUCTION_ORDERS）＋ 領紗（WO_YARN）
+ * ============================================================ */
+
+/** 工作令自動編號：#G + 既有最大序號 + 1（無資料時由 #G24001 起，可延續紙本序列） */
+function nextPWOId_(sheet) {
+  var last = sheet.getLastRow();
+  var max = 23999;
+  if (last >= 2) {
+    var ids = sheet.getRange(2, 1, last - 1, 1).getValues();
+    for (var i = 0; i < ids.length; i++) {
+      var m = String(ids[i][0]).trim().replace(/^#/, '').toUpperCase().match(/^G(\d+)$/);
+      if (m) max = Math.max(max, parseInt(m[1], 10));
+    }
+  }
+  return '#' + 'G' + (max + 1);
+}
+
+/** 依 WO_ID（容許 # 前綴／不分大小寫）找工作令列號；找不到回 -1 */
+function findPWORow_(sheet, woId) {
+  if (!woId) return -1;
+  var target = String(woId).trim().replace(/^#/, '').toUpperCase();
+  var last = sheet.getLastRow();
+  if (last < 2) return -1;
+  var ids = sheet.getRange(2, 1, last - 1, 1).getValues();
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]).trim().replace(/^#/, '').toUpperCase() === target) return i + 2;
+  }
+  return -1;
+}
+
+/** 工作令一列（＋領紗明細）→ 前端資料物件 */
+function rowToPWO_(row, yarnLines) {
+  return {
+    wo_id: String(row[0]).trim(),
+    customer: String(row[1]).trim(),
+    style_no: String(row[2]).trim(),
+    plan_qty: Number(row[3]) || 0,
+    due_date: dueYMD_(row[4]),
+    color_a: String(row[5]).trim(),
+    color_b: String(row[6]).trim(),
+    color_c: String(row[7]).trim(),
+    color_d: String(row[8]).trim(),
+    color_e: String(row[9]).trim(),
+    qty_a: Number(row[10]) || null,
+    qty_b: Number(row[11]) || null,
+    qty_c: Number(row[12]) || null,
+    qty_d: Number(row[13]) || null,
+    qty_e: Number(row[14]) || null,
+    process_setting: String(row[15]).trim(),
+    process_sewing: String(row[16]).trim(),
+    process_packing: String(row[17]).trim(),
+    destination: String(row[18]).trim(),
+    order_ref: String(row[19]).trim(),
+    status: String(row[20]).trim(),
+    actual_good_qty: row[21] === '' ? null : Number(row[21]),
+    confirmed_operator: String(row[22]).trim(),
+    completed_time: String(row[23] || '').trim(),
+    remark: String(row[24]).trim(),
+    yarn_lines: yarnLines || [],
+  };
+}
+
+/** WO_YARN 一列 → 前端資料物件 */
+function rowToWOYarn_(row) {
+  return {
+    wo_id: String(row[0]).trim(),
+    yarn_code: String(row[1]).trim(),
+    yarn_name: String(row[2]).trim(),
+    kg_per_unit: Number(row[3]) || 0,
+    total_kg: Number(row[4]) || 0,
+    source: String(row[5]).trim(),
+    deducted: String(row[6]).trim() === 'Y',
+    deducted_time: String(row[7] || '').trim(),
+  };
+}
+
+/** 讀取某工作令（或全部）的領紗明細 */
+function yarnLinesForWO_(woId, onlyUndeducted) {
+  var sheet = getSheet_(SHEET_PWO_YARN);
+  var values = sheet.getDataRange().getValues();
+  var rows = [];
+  for (var i = 1; i < values.length; i++) {
+    if (String(values[i][0]).trim().replace(/^#/, '').toUpperCase() !==
+        String(woId).trim().replace(/^#/, '').toUpperCase()) continue;
+    if (onlyUndeducted && String(values[i][6]).trim() !== 'N') continue;
+    rows.push(rowToWOYarn_(values[i]));
+  }
+  return rows;
+}
+
+/** 整份新版工作令（含各單領紗明細），以 WO_ID 由新到舊排序 */
+function listProductionOrders_() {
+  var sheet = getSheet_(SHEET_PWO);
+  var values = sheet.getDataRange().getValues();
+  var rows = [];
+  for (var i = 1; i < values.length; i++) {
+    if (String(values[i][0]).trim() === '') continue;
+    var woId = String(values[i][0]).trim();
+    rows.push(rowToPWO_(values[i], yarnLinesForWO_(woId)));
+  }
+  rows.sort(function (a, b) { return String(b.wo_id).localeCompare(String(a.wo_id)); });
+  return rows;
+}
+
+/**
+ * 彙整單張工作令的紗線需求：
+ * ① BOM_MASTER 內屬於 YARN_INVENTORY 的列（Source=BOM）
+ * ② 開單手動指定的 yarn_lines（Source=MANUAL）
+ * 依 Yarn_Code 合併、單頂用紗量相加；未知紗線代碼直接拋錯（必須先建檔）
+ * 回傳 [{ yarn_code, yarn_name, kg_per_unit, total_kg, source }]
+ */
+function resolveYarnNeed_(styleNo, manualLines) {
+  var yarns = listYarn_();
+  var yarnMap = {};
+  yarns.forEach(function (y) { yarnMap[String(y.yarn_code).toUpperCase()] = y; });
+
+  var need = {};   // CODE -> line
+  var order = [];  // 維持第一次出現順序
+  function addLine(code, name, kgUnit, source) {
+    code = String(code || '').trim().replace(/^#/, '').toUpperCase();
+    if (!code) throw new Error('紗線代碼 Yarn_Code 不可空白');
+    var y = yarnMap[code];
+    if (!y) throw new Error('紗線代碼不存在於 YARN_INVENTORY（請先在紗線庫存建檔）：' + code);
+    var kg = Number(kgUnit);
+    if (isNaN(kg) || kg <= 0) throw new Error('單頂用紗量需大於 0：' + code);
+    var line = need[code];
+    if (!line) {
+      line = need[code] = {
+        yarn_code: code,
+        yarn_name: name || y.yarn_name,
+        kg_per_unit: 0,
+        total_kg: 0,
+        sources: [],
+      };
+      order.push(code);
+    }
+    line.kg_per_unit = round4_(line.kg_per_unit + kg);
+    if (line.sources.indexOf(source) === -1) line.sources.push(source);
+  }
+
+  // ① BOM（只有 YARN_INVENTORY 內的品號視為紗線；其餘原料留給完工 BOM 扣料）
+  if (styleNo) {
+    bomForStyle_(styleNo).forEach(function (b) {
+      if (yarnMap[String(b.item_code).trim().toUpperCase()]) {
+        addLine(b.item_code, b.item_name, b.unit_use, 'BOM');
+      }
+    });
+  }
+  // ② 開單直接指定
+  (Array.isArray(manualLines) ? manualLines : []).forEach(function (l) {
+    addLine(l.yarn_code, undefined, l.kg_per_unit, 'MANUAL');
+  });
+
+  var out = [];
+  order.forEach(function (c) {
+    var l = need[c];
+    l.source = l.sources.join('+');
+    l.total_kg = round4_(l.kg_per_unit); // × Plan_Qty 由呼叫端補（write 階段已知量）
+    out.push(l);
+  });
+  return out;
+}
+
+/** 把紗線需求寫入 WO_YARN（先全部 Deducted=N 預估；投產時改 Y 並扣庫存） */
+function writeYarnLines_(woId, need, planQty) {
+  ensureSheet_(SHEET_PWO_YARN);
+  var sheet = getSheet_(SHEET_PWO_YARN);
+  var rows = need.map(function (l) {
+    var total = round4_(l.kg_per_unit * (Number(planQty) || 0));
+    return [woId, l.yarn_code, l.yarn_name, l.kg_per_unit, total, l.source, 'N', ''];
+  });
+  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, PWO_YARN_HEADERS.length).setValues(rows);
+}
+
+/**
+ * 投產扣紗：YARN_INVENTORY.Stock_KG -= Total_KG（不足仍照扣 → 負庫存供現場檢討）
+ * + STOCK_LOG 記錄（出庫）＋ WO_YARN 標記 Deducted=Y
+ * 回傳 { yarn_used, updated_yarn, alerts:[…低於安全庫存／透支提示] }
+ */
+function deductYarn_(woId, operator) {
+  var lines = yarnLinesForWO_(woId, true); // 僅未扣的
+  if (lines.length === 0) return { yarn_used: 0, updated_yarn: [], alerts: [] };
+
+  var logId = 'L' + Utilities.formatDate(new Date(), nowTz_(), 'yyyyMMddHHmmss') +
+    ('000' + Math.floor(Math.random() * 1000)).slice(-3);
+  var logRows = [];
+  var updatedYarn = [];
+  var alerts = [];
+  var seq = 0;
+
+  var yarnSheet = getSheet_(SHEET_YARN);
+  var values = yarnSheet.getDataRange().getValues();
+  var index = {};
+  for (var r = 1; r < values.length; r++) {
+    var k = String(values[r][0]).trim().toUpperCase();
+    if (k && !index[k]) index[k] = r;
+  }
+
+  for (var i = 0; i < lines.length; i++) {
+    var l = lines[i];
+    var idx = index[String(l.yarn_code).toUpperCase()];
+    if (idx === undefined) {
+      alerts.push(l.yarn_code + ' ' + l.yarn_name + '：紗線檔已不存在，未扣庫存（請人工補正）');
+      continue;
+    }
+    var before = Number(values[idx][3]) || 0;
+    var after = round4_(before - l.total_kg);
+    yarnSheet.getRange(idx + 2, 4).setValue(after);
+    yarnSheet.getRange(idx + 2, 6).setValue(now_());
+    var y = rowToYarn_(values[idx]);
+    y.stock_kg = after;
+    y.last_updated = now_();
+    updatedYarn.push(y);
+    logRows.push([logId + ('00' + (seq + 1)).slice(-2), now_(), '出庫', l.yarn_code, -l.total_kg,
+      operator, 'PWO 領紗 ' + woId + '（' + l.source + '）']);
+    seq++;
+    if (after < 0) {
+      alerts.push(l.yarn_code + ' ' + l.yarn_name + '：領紗後透支 ' + Math.abs(after) + ' KG（現場請檢討補料）');
+    } else if (after < (Number(values[idx][4]) || 0)) {
+      alerts.push(l.yarn_code + ' ' + l.yarn_name + '：領紗後 ' + after + ' KG，低於安全庫存');
+    }
+  }
+
+  // STOCK_LOG 一次批次附加
+  if (logRows.length > 0) {
+    var logSheet = getSheet_(SHEET_LOG);
+    logSheet.getRange(logSheet.getLastRow() + 1, 1, logRows.length, LOG_HEADERS.length)
+      .setValues(logRows);
+  }
+
+  // WO_YARN 標記已扣除
+  var yarnRows = getSheet_(SHEET_PWO_YARN).getDataRange().getValues();
+  var yarnSheet2 = getSheet_(SHEET_PWO_YARN);
+  for (var w = 1; w < yarnRows.length; w++) {
+    if (String(yarnRows[w][0]).trim().replace(/^#/, '').toUpperCase() !==
+        String(woId).trim().replace(/^#/, '').toUpperCase()) continue;
+    if (String(yarnRows[w][6]).trim() === 'N') {
+      yarnSheet2.getRange(w + 2, 7).setValue('Y');
+      yarnSheet2.getRange(w + 2, 8).setValue(now_());
+    }
+  }
+
+  return { yarn_used: updatedYarn.length, updated_yarn: updatedYarn, alerts: alerts };
+}
+
+/**
+ * 開立新版工作令：
+ * req = { wo_id?（留空自動 #G 序列）, customer, style_no, plan_qty, due_date,
+ *         colors?: [{color, qty}, …最多5], destination, order_ref?,
+ *         process_setting?, process_sewing?, process_packing?,
+ *         yarn_lines?: [{yarn_code, kg_per_unit}, …],
+ *         start_now?: true 直接投產（立即扣紗）, operator?, remark? }
+ * 配色數量合計若已填且不等於 Plan_Qty → 擋下（紙本「總計＝各組合計」）
+ */
+function createProductionOrder_(req) {
+  var style = String(req.style_no || '').trim();
+  if (!style) throw new Error('缺少型號 Style_No');
+  var planQty = Number(req.plan_qty);
+  if (isNaN(planQty) || planQty <= 0) throw new Error('預計產量 Plan_Qty 必須大於 0');
+  var dest = String(req.destination || '').trim();
+  if (PWO_DESTS.indexOf(dest) === -1) {
+    throw new Error('Destination 必須為：入倉庫備庫 / 訂單出貨，收到：' + dest);
+  }
+  var due = dueYMD_(req.due_date);
+  if (!due) throw new Error('缺少預計交期 Due_Date（格式 YYYY-MM-DD）');
+  var customer = String(req.customer || '').trim();
+  var orderRef = String(req.order_ref || '').trim();
+  var operator = String(req.operator || '').trim() || '—';
+  var remark = String(req.remark || '').trim();
+  var startNow = !!req.start_now;
+
+  // 五色配色（顏色稱呼以頭頂顏色為準）
+  var colors = Array.isArray(req.colors) ? req.colors.slice(0, 5) : [];
+  var colorTexts = ['', '', '', '', ''];
+  var qtyNums = [null, null, null, null, null];
+  var qtySum = 0;
+  var hasQty = false;
+  for (var c = 0; c < 5; c++) {
+    var item = colors[c];
+    if (!item) continue;
+    colorTexts[c] = String(item.color || '').trim();
+    var q = String(item.qty === undefined || item.qty === null ? '' : item.qty).trim();
+    if (q !== '') {
+      var qn = Number(q);
+      if (isNaN(qn) || qn <= 0) throw new Error('第 ' + (c + 1) + ' 組配色數量需為正數');
+      qtyNums[c] = qn;
+      qtySum += qn;
+      hasQty = true;
+    }
+  }
+  if (colorTexts.join('') === '') {
+    throw new Error('請至少填寫一組配色（A色～E色）');
+  }
+  if (hasQty && round4_(qtySum) !== round4_(planQty)) {
+    throw new Error('配色數量合計 ' + qtySum + ' 與預計產量 ' + planQty + ' 不符（請檢查 A色～E色數量）');
+  }
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var sheet = getSheet_(SHEET_PWO);
+    // 工單編號：手動輸入（延續紙本序列）需唯一；留空自動編號 #Gxxxx
+    var woId = String(req.wo_id || '').trim().replace(/^#+/, '').toUpperCase();
+    if (woId) {
+      woId = '#' + woId;
+      if (findPWORow_(sheet, woId) !== -1) throw new Error('工單編號已存在：' + woId);
+    } else {
+      woId = nextPWOId_(sheet);
+    }
+
+    // 紗線需求（BOM＋手動合併；未知紗線代碼會拋錯）
+    var need = resolveYarnNeed_(style, req.yarn_lines);
+    if (need.length === 0 && startNow) {
+      // 無紗線需求不擋投產（例如外包半成品組合），僅提示由前端處理
+    }
+
+    var rowIdx = sheet.getLastRow() + 1;
+    sheet.getRange(rowIdx, 1, 1, PWO_HEADERS.length).setValues([[
+      woId, customer, style, planQty, due,
+      colorTexts[0], colorTexts[1], colorTexts[2], colorTexts[3], colorTexts[4],
+      qtyNums[0], qtyNums[1], qtyNums[2], qtyNums[3], qtyNums[4],
+      String(req.process_setting || '').trim(),
+      String(req.process_sewing || '').trim(),
+      String(req.process_packing || '').trim(),
+      dest, orderRef,
+      startNow ? PWO_STATUS_ACTIVE : PWO_STATUS_DRAFT,
+      '', '', '', remark,
+    ]]);
+
+    // 領紗明細先記錄（Deducted=N）
+    writeYarnLines_(woId, need, planQty);
+
+    var result = {
+      wo: rowToPWO_(sheet.getRange(rowIdx, 1, 1, PWO_HEADERS.length).getValues()[0],
+        yarnLinesForWO_(woId)),
+      yarn_need: need,
+      deduction: { yarn_used: 0, updated_yarn: [], alerts: [] },
+    };
+
+    // 直接投產 → 立即扣紗
+    if (startNow) {
+      result.deduction = deductYarn_(woId, operator);
+    }
+    return result;
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
+}
+
+/** 草稿 → 生產中：立即依預估領紗明細扣 YARN_INVENTORY */
+function startProductionOrder_(req) {
+  var woId = String(req.wo_id || '').trim();
+  if (!woId) throw new Error('缺少 WO_ID');
+  var operator = String(req.operator || '').trim() || '—';
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var sheet = getSheet_(SHEET_PWO);
+    var row = findPWORow_(sheet, woId);
+    if (row === -1) throw new Error('找不到工作令：' + woId);
+    var status = String(sheet.getRange(row, 21).getValue()).trim();
+    if (status !== PWO_STATUS_DRAFT) {
+      throw new Error('只有「草稿」工作令可以投產，目前：' + status);
+    }
+    sheet.getRange(row, 21).setValue(PWO_STATUS_ACTIVE);
+    var deduction = deductYarn_(sheet.getRange(row, 1).getValue(), operator);
+    return {
+      wo: rowToPWO_(sheet.getRange(row, 1, 1, PWO_HEADERS.length).getValues()[0],
+        yarnLinesForWO_(sheet.getRange(row, 1).getValue())),
+      deduction: deduction,
+    };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
+}
+
+/**
+ * 確認完工分流（與舊版對應）：
+ * - 入倉庫備庫 → target_item_code 必填：成品 Actual_Good_Qty 入 INVENTORY_MASTER
+ *   （STOCK_LOG 記錄）＋ 狀態 → 已入庫
+ * - 訂單出貨   → 不入一般成品庫，狀態 → 待出貨（後續由「出庫出貨」分頁開出貨單，
+ *                欄位結構對應 Commercial Invoice / Packing List）
+ * - 紗線已於投產時扣除，此處不重複扣；use_bom 只扣 BOM 台帳內「非紗線」原料
+ * req = { wo_id, actual_good_qty, target_item_code?, use_bom?, operator, remark? }
+ */
+function completeProductionOrder_(req) {
+  var woId = String(req.wo_id || '').trim();
+  if (!woId) throw new Error('缺少 WO_ID');
+  var actual = Number(req.actual_good_qty);
+  if (isNaN(actual) || actual < 0) throw new Error('實際完工良品數 Actual_Good_Qty 格式錯誤');
+  var operator = String(req.operator || '').trim();
+  if (!operator) throw new Error('缺少完工經辦 Confirmed_Operator');
+  var remark = String(req.remark || '').trim();
+  var useBom = !!req.use_bom;
+  var targetItem = String(req.target_item_code || '').trim();
+  var colQty = 5; // INVENTORY_MASTER Stock_Qty 欄
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var woSheet = getSheet_(SHEET_PWO);
+    var row = findPWORow_(woSheet, woId);
+    if (row === -1) throw new Error('找不到工作令：' + woId);
+    var wo = rowToPWO_(woSheet.getRange(row, 1, 1, PWO_HEADERS.length).getValues()[0]);
+    if (wo.status !== PWO_STATUS_ACTIVE && wo.status !== PWO_STATUS_CHECK) {
+      throw new Error('工作令狀態為「' + wo.status + '」，不能完工');
+    }
+
+    var master = getSheet_(SHEET_MASTER);
+    var updatedItems = [];
+    var woRemark = 'PWO 完工 ' + wo.wo_id + (remark ? '；' + remark : '');
+
+    if (wo.destination === '入倉庫備庫') {
+      if (!targetItem) throw new Error('入倉庫備庫完工需選擇入庫成品料號 target_item_code');
+      var itemRow = findMasterRow_(master, targetItem);
+      if (itemRow === -1) throw new Error('品號不存在於 INVENTORY_MASTER：' + targetItem);
+      var cur = Number(master.getRange(itemRow, colQty).getValue()) || 0;
+      master.getRange(itemRow, colQty).setValue(cur + actual);
+      master.getRange(itemRow, 8).setValue(now_());
+      var logId = 'L' + Utilities.formatDate(new Date(), nowTz_(), 'yyyyMMddHHmmss') +
+        ('000' + Math.floor(Math.random() * 1000)).slice(-3);
+      getSheet_(SHEET_LOG).appendRow([
+        logId, now_(), '入庫', String(master.getRange(itemRow, 1).getValue()), actual, operator, woRemark,
+      ]);
+      updatedItems.push(rowToItem_(master.getRange(itemRow, 1, 1, MASTER_HEADERS.length).getValues()[0]));
+    }
+    // 訂單出貨：不入一般成品庫 → 待出貨（連動現有出貨單／CI / PL 流程）
+
+    // 選用：完工時依 BOM 扣「非紗線」原料（紗線已於投產扣過，跳過避免重複）
+    var bomUsed = 0;
+    if (useBom) {
+      var yarnCodes = {};
+      listYarn_().forEach(function (y) { yarnCodes[String(y.yarn_code).toUpperCase()] = true; });
+      bomForStyle_(wo.style_no).forEach(function (b) {
+        var code = String(b.item_code).trim();
+        if (!code || yarnCodes[code.toUpperCase()]) return; // 紗線：投產已扣
+        var consume = round4_(Number(b.unit_use) * actual);
+        if (!(consume > 0)) return;
+        var mRow = findMasterRow_(master, code);
+        if (mRow === -1) return; // 原料品號不存在 → 跳過不擋結案
+        var mCur = Number(master.getRange(mRow, colQty).getValue()) || 0;
+        master.getRange(mRow, colQty).setValue(mCur - consume);
+        master.getRange(mRow, 8).setValue(now_());
+        var logId2 = 'L' + Utilities.formatDate(new Date(), nowTz_(), 'yyyyMMddHHmmss') +
+          ('000' + Math.floor(Math.random() * 1000)).slice(-3);
+        getSheet_(SHEET_LOG).appendRow([logId2, now_(), '出庫', code, -consume, operator,
+          'PWO BOM 扣料 ' + wo.wo_id]);
+        updatedItems.push(rowToItem_(master.getRange(mRow, 1, 1, MASTER_HEADERS.length).getValues()[0]));
+        bomUsed++;
+      });
+    }
+
+    // 更新工作令：狀態／實際良品數／完工經辦／完工時間
+    woSheet.getRange(row, 21).setValue(wo.destination === '入倉庫備庫' ? PWO_STATUS_IN : PWO_STATUS_TOSHIP);
+    woSheet.getRange(row, 22).setValue(actual);        // Actual_Good_Qty
+    woSheet.getRange(row, 23).setValue(operator);      // Confirmed_Operator
+    woSheet.getRange(row, 24).setValue(now_());        // Completed_Time
+    if (remark) {
+      var oldRemark = String(woSheet.getRange(row, 25).getValue() || '').trim();
+      woSheet.getRange(row, 25).setValue(oldRemark ? oldRemark + '；' + remark : remark);
+    }
+
+    return {
+      wo: rowToPWO_(woSheet.getRange(row, 1, 1, PWO_HEADERS.length).getValues()[0],
+        yarnLinesForWO_(wo.wo_id)),
+      updated_items: updatedItems,
+      bom_used: bomUsed,
+    };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
+}
+
+/** 新版工作令：待出貨 → 已出貨（出貨單在「出庫出貨」分頁開立） */
+function shipProductionOrder_(req) {
+  var woId = String(req.wo_id || '').trim();
+  if (!woId) throw new Error('缺少 WO_ID');
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var woSheet = getSheet_(SHEET_PWO);
+    var row = findPWORow_(woSheet, woId);
+    if (row === -1) throw new Error('找不到工作令：' + woId);
+    var status = String(woSheet.getRange(row, 21).getValue()).trim();
+    if (status !== PWO_STATUS_TOSHIP) {
+      throw new Error('只有「待出貨」的工作令可以登記出貨，目前：' + status);
+    }
+    woSheet.getRange(row, 21).setValue(PWO_STATUS_SHIPPED);
+    return { wo: rowToPWO_(woSheet.getRange(row, 1, 1, PWO_HEADERS.length).getValues()[0],
+      yarnLinesForWO_(woId)) };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
 }

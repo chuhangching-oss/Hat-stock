@@ -42,3 +42,18 @@ export const WO_STATUS_COLORS = {
   已入庫: 'bg-emerald-100 text-emerald-700',
   已出貨: 'bg-slate-200 text-slate-500',
 };
+
+// ===== 新版工作令（PRODUCTION_ORDERS，接續紙本「盛全工業 工作令」） =====
+
+// 工作令 V2 狀態標籤顏色
+export const PWO_STATUS_COLORS = {
+  草稿: 'bg-slate-100 text-slate-600',
+  生產中: 'bg-blue-100 text-blue-700',
+  待確認: 'bg-amber-100 text-amber-700',
+  已入庫: 'bg-emerald-100 text-emerald-700',
+  待出貨: 'bg-orange-100 text-orange-700',
+  已出貨: 'bg-slate-200 text-slate-500',
+};
+
+// 五色配色欄標籤（顏色稱呼以頭頂顏色為準）
+export const COLOR_SLOTS = ['A色', 'B色', 'C色', 'D色', 'E色'];

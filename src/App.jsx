@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import useInventory from './hooks/useInventory';
 import useWorkOrders from './hooks/useWorkOrders';
+import useProduction from './hooks/useProduction';
 import { gasRequest, getGasUrl, isManager } from './api';
 import SearchTab from './components/SearchTab';
 import ActionTab from './components/ActionTab';
 import WorkOrderTab from './components/WorkOrderTab';
+import ProductionTab from './components/ProductionTab';
 import ShipmentTab from './components/ShipmentTab';
 import AnalyticsTab from './components/AnalyticsTab';
 import LookbookTab from './components/LookbookTab';
@@ -16,6 +18,7 @@ import Toast from './components/Toast';
 const TABS = [
   { key: 'search', label: '庫存查詢', icon: '🔍', managerOnly: false },
   { key: 'action', label: '出入庫', icon: '📦', managerOnly: false },
+  { key: 'pwo', label: '生產工令', icon: '🏭', managerOnly: false },
   { key: 'wo', label: '工單管理', icon: '📋', managerOnly: false },
   { key: 'ship', label: '出庫出貨', icon: '🚢', managerOnly: false },
   { key: 'book', label: '款式圖鑑', icon: '🧢', managerOnly: false },
@@ -31,6 +34,7 @@ function isLookbookRoute() {
 export default function App() {
   const inventory = useInventory();
   const workOrders = useWorkOrders();
+  const production = useProduction();
   const [tab, setTab] = useState('search');
   const [query, setQuery] = useState(''); // 查詢頁搜尋字
   const [toast, setToast] = useState(null); // { type: 'success'|'error', msg }
@@ -76,11 +80,12 @@ export default function App() {
     [inventory],
   );
 
-  // 頂部「同步」按鈕：庫存主檔＋工作令一起重拉
+  // 頂部「同步」按鈕：庫存主檔＋工作令＋生產工令一起重拉
   const handleSync = useCallback(() => {
     inventory.refresh();
     workOrders.refresh();
-  }, [inventory, workOrders]);
+    production.refresh();
+  }, [inventory, workOrders, production]);
 
   // 出入庫單筆送出（ActionTab「直接入庫新品項」呼叫）
   const handleSubmitLog = useCallback(
@@ -181,6 +186,99 @@ export default function App() {
     [workOrders, showToast],
   );
 
+  // ===== 生產工令（ProductionTab 呼叫） =====
+  const handleCreatePO = useCallback(
+    async (payload) => {
+      try {
+        const res = await production.createPO(payload);
+        const w = res.wo;
+        const alertPart = (res.deduction.alerts || []).length > 0 ? `，⚠️ ${res.deduction.alerts.length} 項庫存提示` : '';
+        const yarnPart = (res.yarn_need || []).length > 0
+          ? `，領紗 ${res.yarn_need.length} 種${payload.start_now ? `（已扣 ${res.deduction.yarn_used || res.yarn_need.length} 種）` : '（投產時扣）'}`
+          : '';
+        showToast(
+          `✅ 工作令已${payload.start_now ? '開立並投產' : '開立（草稿）'}：${w.wo_id}（${w.style_no} × ${w.plan_qty}頂${yarnPart}${alertPart}）`,
+        );
+        return res;
+      } catch (e) {
+        showToast(`❌ 開立失敗：${e.message}`, 'error');
+        throw e;
+      }
+    },
+    [production, showToast],
+  );
+
+  const handleStartPO = useCallback(
+    async (woId, operator) => {
+      try {
+        const res = await production.startPO(woId, operator);
+        const d = res.deduction || {};
+        const alertPart = (d.alerts || []).length > 0
+          ? `，⚠️ ${(d.alerts || []).join('；')}`
+          : '';
+        showToast(`🏭 已投產：${woId}，扣減紗線 ${d.yarn_used || 0} 種${alertPart}`);
+        return res;
+      } catch (e) {
+        showToast(`❌ 投產失敗：${e.message}`, 'error');
+        throw e;
+      }
+    },
+    [production, showToast],
+  );
+
+  const handleCompletePO = useCallback(
+    async (payload) => {
+      try {
+        const res = await production.completePO(payload);
+        (res.updated_items || []).forEach((it) => inventory.applyItem(it));
+        const w = res.wo;
+        if (w.destination === '入倉庫備庫') {
+          showToast(
+            `✅ 已完工入庫：${w.wo_id} → ${w.style_no} ×${w.actual_good_qty}頂${
+              res.bom_used > 0 ? `，並扣 ${res.bom_used} 種非紗線原料` : ''
+            }`,
+          );
+        } else {
+          showToast(`✅ 已完工：${w.wo_id} → 待出貨（${w.style_no} ×${w.actual_good_qty}頂），請到「出庫出貨」開單`);
+        }
+        return res;
+      } catch (e) {
+        showToast(`❌ 完工失敗：${e.message}`, 'error');
+        throw e;
+      }
+    },
+    [production, inventory, showToast],
+  );
+
+  const handleShipPO = useCallback(
+    async (woId) => {
+      try {
+        const res = await production.shipPO(woId);
+        showToast(`📦 已登記出貨：${res.wo.wo_id}（${res.wo.style_no}）`);
+        return res;
+      } catch (e) {
+        showToast(`❌ 登記失敗：${e.message}`, 'error');
+        throw e;
+      }
+    },
+    [production, showToast],
+  );
+
+  const handleSaveYarn = useCallback(
+    async (payload) => {
+      try {
+        const res = await production.saveYarn(payload);
+        const y = res.yarn;
+        showToast(`✅ 紗線已儲存：${y.yarn_code} ${y.yarn_name}（庫存 ${y.stock_kg} KG）`);
+        return res;
+      } catch (e) {
+        showToast(`❌ 儲存失敗：${e.message}`, 'error');
+        throw e;
+      }
+    },
+    [production, showToast],
+  );
+
   // 🌍 訪客展示路由：#/lookbook 只渲染純展示圖鑑（無登入／無分頁／無內部功能）
   if (guestRoute) {
     return (
@@ -201,7 +299,7 @@ export default function App() {
             onClick={handleSync}
             className="min-h-touch flex items-center gap-1 rounded-xl bg-white/10 px-3 text-sm font-bold text-white transition active:bg-white/20"
           >
-            <span className={inventory.loading || workOrders.loading ? 'animate-spin' : ''}>⟳</span> 同步
+            <span className={inventory.loading || workOrders.loading || production.loading ? 'animate-spin' : ''}>⟳</span> 同步
           </button>
         </div>
         <p className="mt-1 text-xs text-blue-200">
@@ -251,6 +349,24 @@ export default function App() {
             onShipWO={handleShipWO}
             bomFor={workOrders.bomFor}
             onRefresh={workOrders.refresh}
+            goToSettings={() => setTab('settings')}
+          />
+        )}
+        {tab === 'pwo' && (
+          <ProductionTab
+            pos={production.pos}
+            yarns={production.yarns}
+            items={inventory.items}
+            bomFor={workOrders.bomFor}
+            loading={production.loading}
+            error={production.error}
+            showToast={showToast}
+            onCreatePO={handleCreatePO}
+            onStartPO={handleStartPO}
+            onCompletePO={handleCompletePO}
+            onShipPO={handleShipPO}
+            onSaveYarn={handleSaveYarn}
+            onRefresh={production.refresh}
             goToSettings={() => setTab('settings')}
           />
         )}

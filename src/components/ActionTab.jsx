@@ -240,10 +240,11 @@ export default function ActionTab({
   }
 
   function handleOpenConfirm() {
+    if (busy) return;
     if (!lines.length) return showToast('❌ 清單尚未加入任何品項', 'error');
     if (!allFilled) return showToast('❌ 尚有品項未填數量（盤點可為 0）', 'error');
     if (overLines.length > 0) return showToast(`❌ ${overLines.length} 列出庫量大於在庫量，已阻擋送出`, 'error');
-    if (!operator.trim()) return showToast('❌ 請填寫經辦人姓名', 'error');
+    if (!operator.trim()) return showToast('❌ 請填寫經辦人姓名（送出前必填）', 'error');
     setConfirmOpen(true);
   }
 
@@ -752,12 +753,26 @@ export default function ActionTab({
                 <b className="text-lg text-blue-700">{fmtQty(totalQty)}</b>
               </span>
             </div>
+            {lines.length > 0 && !allFilled && (
+              <p className="mt-1 px-1 text-xs font-extrabold text-red-600">
+                ⚠️ 尚有品項未填數量，請補齊後送出
+              </p>
+            )}
+            {!operator.trim() && (
+              <p className="mt-1 px-1 text-xs font-extrabold text-red-600">
+                ⚠️ 請先在上方填寫／選擇「經辦人」才能送出
+              </p>
+            )}
             {overLines.length > 0 && (
               <p className="mt-1 px-1 text-xs font-extrabold text-red-600">
                 ⚠️ {overLines.length} 列出庫量大於在庫量，已阻擋送出
               </p>
             )}
-            <button className="btn-primary mt-2" disabled={!canSubmit || busy} onClick={handleOpenConfirm}>
+            {/* 不用 disabled：按下時永遠給理由提示（避免「點了沒反應」像當機） */}
+            <button
+              className={`btn-primary mt-2 ${!canSubmit ? 'opacity-40' : ''}`}
+              onClick={handleOpenConfirm}
+            >
               {busy ? '送出中…' : `一鍵確認送出（共 ${fmtQty(totalQty)} 件）`}
             </button>
           </div>
@@ -767,6 +782,7 @@ export default function ActionTab({
       {/* ===== 批次挑選彈窗（多選＋逐列填數量 → 整批帶入暫存清單） ===== */}
       <BatchItemPicker
         open={batchOpen}
+        mode={mode}
         items={items}
         showToast={showToast}
         onClose={() => setBatchOpen(false)}
