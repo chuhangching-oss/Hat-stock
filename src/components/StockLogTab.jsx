@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { getGasUrl } from '../api';
+import { useEffect, useMemo, useState } from 'react';
+import { gasRequest, getGasUrl } from '../api';
 import { WO_STATUS_COLORS } from '../constants';
 
 function fmtQty(n) {
@@ -30,6 +30,21 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
   const [keyword, setKeyword] = useState('');
   const [type, setType] = useState('全部');
   const [period, setPeriod] = useState('全部');
+  const [customer, setCustomer] = useState('全部');
+  const [customers, setCustomers] = useState([]); // 客戶清單（客戶篩選下拉用）
+
+  // 讀客戶清單（只讀一次；讀失敗不擋本頁，只是不顯示客戶篩選）
+  useEffect(() => {
+    let alive = true;
+    gasRequest(getGasUrl(), { action: 'list_customers' })
+      .then((list) => {
+        if (alive && Array.isArray(list)) setCustomers(list);
+      })
+      .catch(() => { /* 客戶表讀不到 → 不顯示客戶篩選 */ });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   if (!getGasUrl()) {
     return (
@@ -59,17 +74,25 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
 
   const filtered = useMemo(() => {
     const f = keyword.trim().toLowerCase();
+    const cust = customer === '全部' ? '' : customer.trim().toLowerCase();
     return logs.filter((l) => {
       if (type !== '全部' && l.type !== type) return false;
       const d = String(l.timestamp || '').slice(0, 10);
       if (range.from && d && d < range.from) return false;
       if (range.to && d && d > range.to) return false;
+      // 客戶篩選：比對備註（出庫紀錄備註格式＝「出貨 SH… ／ 客戶名；…」）
+      if (cust) {
+        const hit =
+          String(l.remark || '').toLowerCase().includes(cust) ||
+          String(l.item_name || '').toLowerCase().includes(cust);
+        if (!hit) return false;
+      }
       if (!f) return true;
       return `${l.item_code} ${l.item_name} ${l.color_spec} ${l.operator} ${l.remark} ${l.log_id}`
         .toLowerCase()
         .includes(f);
     });
-  }, [logs, type, range, keyword]);
+  }, [logs, type, range, keyword, customer]);
 
   // 篩選範圍內合計（依正負值分加總；盤點 ± 都算進去）
   const sum = useMemo(() => {
@@ -131,6 +154,22 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}
         />
+        {/* 客戶篩選（客戶清單讀到才顯示） */}
+        {customers.length > 0 && (
+          <select
+            className="field-input"
+            value={customer}
+            onChange={(e) => setCustomer(e.target.value)}
+          >
+            <option value="全部">客戶：全部（{customers.length} 家）</option>
+            {customers.map((c) => (
+              <option key={c.customer_id} value={c.customer_name}>
+                {c.customer_name}
+                {c.country ? `（${c.country}）` : ''}
+              </option>
+            ))}
+          </select>
+        )}
         <div className="flex flex-wrap gap-1.5">
           {TYPE_TAGS.map((t) => (
             <button
