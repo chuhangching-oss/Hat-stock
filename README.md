@@ -274,6 +274,16 @@ POST { action:"batchStockTransaction",           （或 batch_stock_transaction�
        主檔兩欄 setValues 一次寫回、STOCK_LOG 批次附加；
        出庫且有填 customer → 同時建立出貨單
 POST { action:"list_shipments" }                           → 出貨單主表（匯出 Invoice/Packing List 用）
+POST { action:"get_shipment", shipment_id }                → 單張出貨單（order＋lines，lines 帶試算表 row）
+POST { action:"update_shipment", shipment_id, operator,
+       shipment_date?, customer_name?, status?, remark?,
+       invoice_no?, carrier?, port_from?, port_to?,
+       incoterm?, currency?,
+       lines?:[{ row, qty }, …], force? }                  → 🔧 HC 限定編輯出貨單
+       lines 數量修正會自動調整庫存（增→扣、減→回補；不足需 force），
+       並� STOCK_LOG「修正出貨單 SH…」；單頭統計（款式/箱數/金額/重量）自動重算
+POST { action:"delete_shipment", shipment_id, operator }   → 🔧 HC 限定刪除整張出貨單
+       主表＋明細整張移除；各品號數量【回補庫存】並寫 STOCK_LOG type=回補
 POST { action:"getSalesReport", operator, period?:"ALL"|"YEAR"|"MONTH" } → 營運統計報表
        🔐 僅限管理者 HC / MAIN（不分大小寫、容許 01-HC 等名冊格式）：
        其他身分直接拋「權限不足…」（ok:false，等同 403），

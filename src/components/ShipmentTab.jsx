@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { gasRequest, getGasUrl, getOperator } from '../api';
+import { gasRequest, getGasUrl, getOperator, isManager } from '../api';
 import ConfirmDialog from './ConfirmDialog';
 import BatchItemPicker from './BatchItemPicker';
 
@@ -71,6 +71,17 @@ export default function ShipmentTab({
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  // ===== 歷史出貨單管理（HC 限定：編輯單頭／修正數量／刪除整張回補庫存） =====
+  const manager = isManager();
+  const [shipList, setShipList] = useState(null); // null = 未載入
+  const [shipFilter, setShipFilter] = useState('');
+  const [shipDetail, setShipDetail] = useState(null); // {order, lines}
+  const [shipEdit, setShipEdit] = useState({}); // 單頭欄位編輯值
+  const [shipLineQty, setShipLineQty] = useState({}); // row(明細列號) → 新數量字串
+  const [shipForce, setShipForce] = useState(false);
+  const [shipBusy, setShipBusy] = useState(false);
+  const [shipDelArm, setShipDelArm] = useState(false); // 刪除兩段式解除保險
+
   const loadCustomers = async () => {
     setCustomers(null);
     try {
@@ -86,6 +97,130 @@ export default function ShipmentTab({
     loadCustomers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ===== 歷史出貨單管理（HC 限定） =====
+  const loadShipments = async () => {
+    setShipList(null);
+    try {
+      const rows = await gasRequest(getGasUrl(), { action: 'list_shipments' });
+      setShipList(Array.isArray(rows) ? rows.slice(0, 100) : []);
+    } catch (e) {
+      setShipList([]);
+      showToast(`⚠️ 出貨單清單載入失敗：${e.message}`, 'error');
+    }
+  };
+
+  /** HC → 掛載時自動載入歷史出貨單 */
+  useEffect(() => {
+    if (manager) loadShipments();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** 展開單張出貨單詳情（單頭×明細，含試算表列號） */
+  async function openShipment(o) {
+    setShipDetail({ order: { ...o, _loading: true }, lines: [] });
+    setShipEdit({});
+    setShipLineQty({});
+    setShipForce(false);
+    setShipDelArm(false);
+    try {
+      const res = await gasRequest(getGasUrl(), { action: 'get_shipment', shipment_id: o.shipment_id });
+      setShipDetail(res);
+      setShipEdit({
+        shipment_date: res.order.shipment_date || '',
+        customer_name: res.order.customer_name || '',
+        status: res.order.status || '',
+        remark: res.order.remark || '',
+        invoice_no: res.order.invoice_no || '',
+        carrier: res.order.carrier || '',
+        port_from: res.order.port_from || '',
+        port_to: res.order.port_to || '',
+        incoterm: res.order.incoterm || '',
+        currency: res.order.currency || '',
+      });
+      setShipLineQty(
+        Object.fromEntries(res.lines.map((l) => [String(l.row), String(l.qty)])),
+      );
+    } catch (e) {
+      setShipDetail(null);
+      showToast(`❌ 讀取出貨單失敗：${e.message}`, 'error');
+    }
+  }
+
+  /** 儲存修改（單頭＋數量）→ update_shipment */
+  async function handleShipUpdate() {
+    if (!shipDetail) return;
+    const changedLines = shipDetail.lines
+      .filter((l) => Number(shipLineQty[String(l.row)]) !== Number(l.qty))
+      .map((l) => ({ row: l.row, qty: Number(shipLineQty[String(l.row)]) }));
+    if (
+      changedLines.length > 0 &&
+      changedLines.some((l) => !(isFinite(l.qty) && l.qty > 0))
+    ) {
+      return showToast('❌ 修正後的數量必須大於 0', 'error');
+    }
+    setShipBusy(true);
+    try {
+      const res = await gasRequest(getGasUrl(), {
+        action: 'update_shipment',
+        shipment_id: shipDetail.order.shipment_id,
+        operator: operator.trim() || 'HC',
+        shipment_date: shipEdit.shipment_date,
+        customer_name: shipEdit.customer_name,
+        status: shipEdit.status,
+        remark: shipEdit.remark,
+        invoice_no: shipEdit.invoice_no,
+        carrier: shipEdit.carrier,
+        port_from: shipEdit.port_from,
+        port_to: shipEdit.port_to,
+        incoterm: shipEdit.incoterm,
+        currency: shipEdit.currency,
+        force: shipForce,
+        lines: changedLines,
+      });
+      (res.updated_items || []).forEach((it) => onItemsUpdated(it));
+      showToast(
+        `✅ 出貨單 ${res.shipment_id} 已更新` +
+          (changedLines.length ? `（修正 ${changedLines.length} 列數量，庫存已同步調整）` : ''),
+      );
+      setShipBusy(false);
+      const id = shipDetail.order.shipment_id;
+      await loadShipments();
+      const fresh = await gasRequest(getGasUrl(), { action: 'get_shipment', shipment_id: id });
+      setShipDetail(fresh);
+      setShipLineQty(Object.fromEntries(fresh.lines.map((l) => [String(l.row), String(l.qty)])));
+      setShipForce(false);
+    } catch (e) {
+      setShipBusy(false);
+      showToast(`❌ 修改失敗：${e.message}`, 'error');
+    }
+  }
+
+  /** 刪除整張出貨單（回補庫存並寫回補紀錄） */
+  async function handleShipDelete() {
+    if (!shipDetail) return;
+    setShipBusy(true);
+    try {
+      const res = await gasRequest(getGasUrl(), {
+        action: 'delete_shipment',
+        shipment_id: shipDetail.order.shipment_id,
+        operator: operator.trim() || 'HC',
+      });
+      (res.returned || []).forEach((r) => {
+        const it = (items || []).find((x) => x.item_code === r.item_code);
+        if (it) onItemsUpdated({ ...it, stock_qty: Number(it.stock_qty || 0) + Number(r.qty) });
+      });
+      showToast(
+        `🗑 出貨單 ${res.shipment_id} 已刪除：${res.restored_count} 個品號庫存已回補（STOCK_LOG 記「回補」）`,
+      );
+      setShipBusy(false);
+      setShipDetail(null);
+      await loadShipments();
+    } catch (e) {
+      setShipBusy(false);
+      showToast(`❌ 刪除失敗：${e.message}`, 'error');
+    }
+  }
 
   /** 掃碼加入一列明細（數量留空待填） */
   function addLine(item) {
@@ -574,6 +709,72 @@ export default function ShipmentTab({
         )}
       </div>
 
+      {/* ===== 歷史出貨單管理（HC 限定：編輯單頭／修正數量／刪除整張回補庫存） ===== */}
+      {manager && (
+        <div className="mt-6 space-y-2 rounded-3xl bg-white p-4 shadow-card">
+          <div className="flex items-center justify-between">
+            <h3 className="text-base font-extrabold text-slate-900">🗂 歷史出貨單（HC 管理）</h3>
+            <button
+              onClick={loadShipments}
+              disabled={shipList === null}
+              className="rounded-xl px-3 py-1.5 text-xs font-extrabold text-blue-700 transition active:scale-95 disabled:opacity-40"
+            >
+              ⟳ 更新
+            </button>
+          </div>
+
+          {shipList === null ? (
+            <p className="py-4 text-center text-sm font-bold text-slate-400">⟳ 載入出貨單清單中…</p>
+          ) : shipList.length === 0 ? (
+            <p className="py-4 text-center text-xs font-bold text-slate-400">
+              還沒有任何出貨單（送出第一張之後會出現在此）
+            </p>
+          ) : (
+            <>
+              <input
+                className="field-input"
+                placeholder="搜尋：單號 SH… / 客戶 / Invoice…"
+                value={shipFilter}
+                onChange={(e) => setShipFilter(e.target.value)}
+              />
+              <ul className="divide-y divide-slate-100 overflow-hidden rounded-2xl border border-slate-100">
+                {shipList
+                  .filter((o) => {
+                    const f = shipFilter.trim().toLowerCase();
+                    if (!f) return true;
+                    return `${o.shipment_id} ${o.customer_name} ${o.invoice_no} ${o.shipment_date} ${o.remark}`
+                      .toLowerCase()
+                      .includes(f);
+                  })
+                  .slice(0, 50)
+                  .map((o) => (
+                    <li key={o.shipment_id}>
+                      <button
+                        onClick={() => openShipment(o)}
+                        className="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left transition active:bg-slate-50"
+                      >
+                        <span className="min-w-0">
+                          <span className="font-mono text-xs font-bold text-blue-700">{o.shipment_id}</span>
+                          <span className="ml-2 text-sm font-extrabold text-slate-800">{o.customer_name}</span>
+                          <span className="block text-[11px] font-semibold text-slate-400">
+                            {o.shipment_date || '—'} · {o.total_styles} 款 · {fmtQty(o.total_pcs)} PCS
+                            {o.total_amount ? ` · $${fmtQty(o.total_amount)}` : ''}
+                            {o.invoice_no ? ` · ${o.invoice_no}` : ''} · {o.status || ''}
+                          </span>
+                        </span>
+                        <span className="shrink-0 text-xs font-extrabold text-slate-400">✏️ / 🗑</span>
+                      </button>
+                    </li>
+                  ))}
+              </ul>
+              <p className="px-1 text-[10px] font-bold text-slate-400">
+                顯示最近 100 張內、搜尋後前 50 張。點任一張可編輯單頭／明細數量，或刪除整張（庫存自動回補）
+              </p>
+            </>
+          )}
+        </div>
+      )}
+
       {/* ===== 底部統計浮動列 ===== */}
       {lines.length > 0 && (
         <div
@@ -613,6 +814,215 @@ export default function ShipmentTab({
             >
               {busy ? '送出中…' : `🚢 確認出貨並建立單據（共 ${fmtQty(totalQty)} PCS）`}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ===== 歷史出貨單詳情／編輯彈窗（HC） ===== */}
+      {shipDetail && (
+        <div
+          className="fixed inset-0 z-30 flex items-end justify-center bg-black/50 p-4 sm:items-center"
+          onClick={() => !shipBusy && setShipDetail(null)}
+        >
+          <div
+            className="flex max-h-[88vh] w-full max-w-md flex-col rounded-3xl bg-white shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* 標題 */}
+            <div className="flex items-center justify-between border-b border-slate-100 p-4 pb-3">
+              <h3 className="truncate text-lg font-extrabold">
+                ✏️ 出貨單 {shipDetail.order.shipment_id}
+              </h3>
+              <button className="text-slate-400" onClick={() => !shipBusy && setShipDetail(null)}>✕</button>
+            </div>
+
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+              {shipDetail.order._loading && (
+                <p className="py-6 text-center text-sm font-bold text-slate-400">⟳ 載入明細中…</p>
+              )}
+              {!shipDetail.order._loading && (
+                <>
+                  {/* 單頭編輯 */}
+                  <div className="space-y-2 rounded-2xl bg-slate-50 p-3">
+                    <p className="text-xs font-extrabold text-slate-500">單頭（可直接改）</p>
+                    <div className="flex gap-2">
+                      <div className="flex-1">
+                        <label className="field-label">出貨日期</label>
+                        <input
+                          className="field-input"
+                          type="date"
+                          value={shipEdit.shipment_date || ''}
+                          onChange={(e) => setShipEdit((p) => ({ ...p, shipment_date: e.target.value }))}
+                        />
+                      </div>
+                      <div className="flex-1">
+                        <label className="field-label">狀態</label>
+                        <input
+                          className="field-input"
+                          placeholder="已出庫"
+                          value={shipEdit.status || ''}
+                          onChange={(e) => setShipEdit((p) => ({ ...p, status: e.target.value }))}
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="field-label">客戶</label>
+                      <input
+                        className="field-input"
+                        value={shipEdit.customer_name || ''}
+                        onChange={(e) => setShipEdit((p) => ({ ...p, customer_name: e.target.value }))}
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <div className="flex-1">
+                        <label className="field-label">Invoice No</label>
+                        <input
+                          className="field-input font-mono"
+                          value={shipEdit.invoice_no || ''}
+                          onChange={(e) => setShipEdit((p) => ({ ...p, invoice_no: e.target.value }))}
+                        />
+                      </div>
+                      <div className="flex-1">
+                        <label className="field-label">船名航次</label>
+                        <input
+                          className="field-input"
+                          value={shipEdit.carrier || ''}
+                          onChange={(e) => setShipEdit((p) => ({ ...p, carrier: e.target.value }))}
+                        />
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        className="field-input flex-1"
+                        placeholder="起運港"
+                        value={shipEdit.port_from || ''}
+                        onChange={(e) => setShipEdit((p) => ({ ...p, port_from: e.target.value }))}
+                      />
+                      <input
+                        className="field-input flex-1"
+                        placeholder="目的港"
+                        value={shipEdit.port_to || ''}
+                        onChange={(e) => setShipEdit((p) => ({ ...p, port_to: e.target.value }))}
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        className="field-input flex-1"
+                        placeholder="貿易條件"
+                        value={shipEdit.incoterm || ''}
+                        onChange={(e) => setShipEdit((p) => ({ ...p, incoterm: e.target.value }))}
+                      />
+                      <input
+                        className="field-input w-24 shrink-0"
+                        placeholder="幣別"
+                        value={shipEdit.currency || ''}
+                        onChange={(e) => setShipEdit((p) => ({ ...p, currency: e.target.value }))}
+                      />
+                    </div>
+                    <div>
+                      <label className="field-label">備註 / 買方 PO</label>
+                      <input
+                        className="field-input"
+                        value={shipEdit.remark || ''}
+                        onChange={(e) => setShipEdit((p) => ({ ...p, remark: e.target.value }))}
+                      />
+                    </div>
+                  </div>
+
+                  {/* 明細數量修正 */}
+                  <div>
+                    <p className="mb-1 text-xs font-extrabold text-slate-500">
+                      明細（數量可修正；改完儲存會自動調整庫存）
+                    </p>
+                    <div className="space-y-1.5">
+                      {shipDetail.lines.map((l) => {
+                        const key = String(l.row);
+                        const cur = Number(shipLineQty[key] ?? l.qty);
+                        const orig = Number(l.qty);
+                        const changed = cur !== orig;
+                        return (
+                          <div
+                            key={key}
+                            className={`flex items-center gap-2 rounded-2xl border px-3 py-2 ${
+                              changed ? 'border-amber-400 bg-amber-50' : 'border-slate-100'
+                            }`}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <b className="text-sm text-slate-900">{l.item_name}</b>
+                              {l.color_spec && <span className="text-xs text-slate-500">（{l.color_spec}）</span>}
+                              <span className="block font-mono text-[10px] text-slate-400">
+                                {l.item_code}
+                                {l.carton_no ? ` · ${l.carton_no}` : ''}
+                                {l.unit_price ? ` · $${fmtQty(l.unit_price)}` : ''}
+                              </span>
+                            </div>
+                            <input
+                              type="number"
+                              inputMode="decimal"
+                              min="0"
+                              className={`h-11 w-20 shrink-0 rounded-xl border-2 px-2 text-right font-black tabular-nums ${
+                                changed ? 'border-amber-400 text-amber-700' : 'border-slate-200 text-slate-700'
+                              }`}
+                              value={shipLineQty[key] ?? String(l.qty)}
+                              onChange={(e) =>
+                                setShipLineQty((p) => ({ ...p, [key]: e.target.value }))
+                              }
+                            />
+                            <span className="w-10 shrink-0 text-[10px] font-bold text-slate-400">{l.unit}</span>
+                          </div>
+                        );
+                      })}
+                      {shipDetail.lines.length === 0 && (
+                        <p className="text-center text-xs font-bold text-slate-400">此單沒有明細</p>
+                      )}
+                    </div>
+                    {shipDetail.lines.some(
+                      (l) => Number(shipLineQty[String(l.row)]) > Number(l.qty),
+                    ) && (
+                      <label className="mt-2 flex items-start gap-2 rounded-2xl bg-amber-50 px-3 py-2 ring-1 ring-amber-200">
+                        <input
+                          type="checkbox"
+                          checked={shipForce}
+                          onChange={(e) => setShipForce(e.target.checked)}
+                          className="mt-0.5 h-4 w-4 accent-amber-600"
+                        />
+                        <span className="text-[11px] font-bold leading-snug text-amber-800">
+                          🩹 補帳模式：數量調整需要追加扣庫但帳面庫存不足時，勾起來允許負庫存
+                        </span>
+                      </label>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* 底部操作 */}
+            <div className="space-y-2 border-t border-slate-100 p-4 pt-3 pb-[calc(1rem+env(safe-area-inset-bottom))]">
+              <button
+                className="btn-primary"
+                disabled={shipBusy}
+                onClick={handleShipUpdate}
+              >
+                {shipBusy ? '處理中…' : '💾 儲存修改'}
+              </button>
+              <button
+                className={`min-h-touch w-full rounded-2xl py-2.5 text-sm font-extrabold transition active:scale-[0.98] ${
+                  shipDelArm ? 'bg-red-600 text-white' : 'bg-red-100 text-red-600'
+                }`}
+                disabled={shipBusy}
+                onClick={() => {
+                  if (!shipDelArm) return setShipDelArm(true);
+                  handleShipDelete();
+                }}
+              >
+                {shipDelArm ? '⚠️ 再按一次＝真的刪除整張（庫存回補）' : '🗑 刪除整張出貨單（回補庫存）'}
+              </button>
+              {shipDelArm && (
+                <p className="px-1 text-[10px] font-bold text-red-500">
+                  刪除後：主表＋明細整張移除，各品號如有失誤可用「庫存查詢」核對；STOCK_LOG 會記「回補」紀錄
+                </p>
+              )}
+            </div>
           </div>
         </div>
       )}

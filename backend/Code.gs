@@ -273,6 +273,15 @@ function doPost(e) {
       case 'list_shipments':
         data = listShipments_();
         break;
+      case 'get_shipment':
+        data = getShipment_(req);
+        break;
+      case 'update_shipment':
+        data = updateShipment_(req);
+        break;
+      case 'delete_shipment':
+        data = deleteShipment_(req);
+        break;
       case 'getSalesReport':
       case 'get_sales_report':
         data = getSalesReport_(req);
@@ -321,7 +330,8 @@ function doPost(e) {
             'ping', 'list', 'get', 'log', 'list_operators', 'upload_photo',
             'list_work_orders', 'list_bom', 'create_work_order', 'complete_work_order',
             'ship_work_order', 'list_customers', 'add_customer', 'create_shipment',
-            'list_shipments', 'getSalesReport', 'batchStockTransaction',
+            'list_shipments', 'get_shipment', 'update_shipment', 'delete_shipment',
+            'getSalesReport', 'batchStockTransaction',
             'update_item_info', 'public_lookbook', 'list_yarn', 'save_yarn',
             'list_production_orders', 'create_production_order', 'start_production_order',
             'complete_production_order', 'ship_production_order', 'list_stock_logs',
@@ -1482,6 +1492,359 @@ function listShipments_() {
   }
   rows.sort(function (a, b) { return String(b.shipment_id).localeCompare(String(a.shipment_id)); });
   return rows;
+}
+
+/** ============================================================================
+ * 🔧 HC 限定：出貨單補救工具（編輯單頭／刪除整張回補庫存）
+ * - 權限：operator 需為管理者（isManagerOp_：HC / MAIN，相容 01-HC、HC-王小明）
+ * - 刪除出貨單會把各明細數量【回補庫存】並寫入 STOCK_LOG（type=回補，備註含單號）
+ * ========================================================================== */
+function checkShipmentAdmin_(operator) {
+  if (!isManagerOp_(operator)) {
+    throw new Error('權限不足：僅限管理者（HC / MAIN）刪改出貨單。' +
+      '目前身分：' + (String(operator || '').trim() || '未填經辦人'));
+  }
+}
+
+/** 找出貨單主表列：回傳 { rowIdx(0-based), order(SHP_HEADERS 物件) } 或 null */
+function findShipmentRow_(sheet, shipmentId) {
+  var values = sheet.getDataRange().getValues();
+  for (var i = 1; i < values.length; i++) {
+    if (String(values[i][0]).trim() === String(shipmentId).trim()) {
+      var v = values[i];
+      return {
+        rowIdx: i,
+        order: {
+          shipment_id: String(v[0]).trim(),
+          shipment_date: dueYMD_(v[1]),
+          customer_name: String(v[2]).trim(),
+          total_styles: Number(v[3]) || 0,
+          total_pcs: Number(v[4]) || 0,
+          status: String(v[5]).trim(),
+          remark: String(v[6]).trim(),
+          invoice_no: v.length > 7 ? String(v[7]).trim() : '',
+          carrier: v.length > 8 ? String(v[8]).trim() : '',
+          port_from: v.length > 9 ? String(v[9]).trim() : '',
+          port_to: v.length > 10 ? String(v[10]).trim() : '',
+          incoterm: v.length > 11 ? String(v[11]).trim() : '',
+          currency: v.length > 12 ? String(v[12]).trim() : '',
+          total_cartons: v.length > 13 ? Number(v[13]) || 0 : 0,
+          total_amount: v.length > 14 ? Number(v[14]) || 0 : 0,
+          total_nw: v.length > 15 ? Number(v[15]) || 0 : 0,
+          total_gw: v.length > 16 ? Number(v[16]) || 0 : 0,
+        },
+      };
+    }
+  }
+  return null;
+}
+
+/** 該出貨單的全部明細列：回傳 [{ rowIdx(0-based), row(試算表列號1-based), line }] */
+function listShipmentLines_(detSheet, shipmentId) {
+  var values = detSheet.getDataRange().getValues();
+  var out = [];
+  for (var i = 1; i < values.length; i++) {
+    if (String(values[i][0]).trim() !== String(shipmentId).trim()) continue;
+    var v = values[i];
+    out.push({
+      rowIdx: i,
+      row: i + 1,
+      line: {
+        item_code: String(v[1]).trim(),
+        item_name: String(v[2]).trim(),
+        color_spec: String(v[3]).trim(),
+        qty: Number(v[4]) || 0,
+        unit: String(v[5]).trim(),
+        carton_no: String(v[6]).trim(),
+        unit_price: Number(v[7]) || 0,
+        n_w: Number(v[8]) || 0,
+        g_w: Number(v[9]) || 0,
+        amount: Number(v[10]) || 0,
+      },
+    });
+  }
+  return out;
+}
+
+/**
+ * 取單張出貨單（單頭＋明細，前端「出庫出貨→歷史出貨單管理」用）
+ * req = { action:'get_shipment', shipment_id }
+ */
+function getShipment_(req) {
+  var shipmentId = String(req.shipment_id || '').trim();
+  if (!shipmentId) throw new Error('缺少 shipment_id');
+  var sheet = getSheet_(SHEET_SHP);
+  var hit = findShipmentRow_(sheet, shipmentId);
+  if (!hit) throw new Error('找不到出貨單：' + shipmentId);
+  var lines = listShipmentLines_(getSheet_(SHEET_SHPD), shipmentId).map(function (x) {
+    var L = x.line;
+    L.row = x.row; // SHIPMENT_DETAILS 試算表列號（update_shipment lines 用）
+    return L;
+  });
+  return { order: hit.order, lines: lines };
+}
+
+/**
+ * 編輯出貨單（HC 限定）：單頭欄位＋明細數量修正
+ * req = { action:'update_shipment', shipment_id, operator,
+ *         shipment_date?, customer_name?, status?, remark?,
+ *         invoice_no?, carrier?, port_from?, port_to?, incoterm?, currency?,
+ *         lines?: [{ row: SHIPMENT_DETAILS 試算表列號, qty }]   ← 數量修正（自動調整庫存）
+ *       }
+ * - 數量修正：新合計 < 舊合計 → 多出的量回補庫存；新合計 > 舊合計 → 追加扣庫
+ *   （庫存不足且有填 force:true 才放行負庫存）
+ * - 每次修正寫 STOCK_LOG：type=入庫/出庫，備註「修正出貨單 SH…：品號 n→m（經辦）」
+ */
+function updateShipment_(req) {
+  var shipmentId = String(req.shipment_id || '').trim();
+  if (!shipmentId) throw new Error('缺少 shipment_id');
+  checkShipmentAdmin_(req.operator);
+  var lines = Array.isArray(req.lines) ? req.lines : [];
+  var force = !!req.force;
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var shpSheet = getSheet_(SHEET_SHP);
+    var hit = findShipmentRow_(shpSheet, shipmentId);
+    if (!hit) throw new Error('找不到出貨單：' + shipmentId);
+
+    // ① 單頭欄位更新（有提供才覆寫）
+    var H = hit.order;
+    var f = {
+      1: String(req.shipment_date || '').trim() ? dueYMD_(req.shipment_date) : '',
+      2: String(req.customer_name || '').trim(),
+      5: String(req.status || '').trim(),
+      6: String(req.remark || '').trim(),
+      7: String(req.invoice_no || '').trim(),
+      8: String(req.carrier || '').trim(),
+      9: String(req.port_from || '').trim(),
+      10: String(req.port_to || '').trim(),
+      11: String(req.incoterm || '').trim(),
+      12: String(req.currency || '').trim(),
+    };
+    for (var col in f) {
+      var v = f[col];
+      if (v !== '') shpSheet.getRange(hit.rowIdx + 1, Number(col)).setValue(v);
+    }
+
+    // ② 明細數量修正（庫存隨動）
+    var updatedItems = [];
+    if (lines.length > 0) {
+      var detSheet = getSheet_(SHEET_SHPD);
+      var detLines = listShipmentLines_(detSheet, shipmentId);
+      var byRow = {};
+      detLines.forEach(function (x) { byRow[x.row] = x; });
+
+      // 先驗證所有要改的列（一次讀取主檔；超出在庫整批擋，force 才放行）
+      var master = getSheet_(SHEET_MASTER);
+      var values = master.getDataRange().getValues();
+      var index = {};
+      for (var r = 1; r < values.length; r++) {
+        var k = String(values[r][0]).trim().toUpperCase();
+        if (k && !index[k]) index[k] = r;
+      }
+      var aggDelta = {};   // code → 增量（>0 追加出庫、<0 回補）
+      var shortages = [];
+      var nRowsM = values.length;
+      var newStocks = [];
+      var newUpdated = [];
+      for (var s = 0; s < nRowsM; s++) {
+        newStocks.push([Number(values[s][4]) || 0]);
+        newUpdated.push([String(values[s][7] || '')]);
+      }
+      for (var i = 0; i < lines.length; i++) {
+        var ln = lines[i];
+        var row = Number(ln.row);
+        var x = byRow[row];
+        if (!x) throw new Error('明細列不存在：row ' + row + '（畫面資料已過期，請重新整理再試）');
+        var newQty = Number(ln.qty);
+        if (isNaN(newQty) || newQty <= 0) throw new Error('列 ' + (x.line.item_code) + ' 數量需大於 0');
+        var cur = x.line.qty;
+        if (newQty === cur) continue; // 沒變就不動
+        var delta = newQty - cur; // >0：追加出庫（扣多），<0：回補（出少了）
+        aggDelta[x.line.item_code] = (aggDelta[x.line.item_code] || 0) + delta;
+      }
+      for (var c in aggDelta) {
+        var rowIdx = index[c];
+        if (rowIdx === undefined) throw new Error('品號不存在於 INVENTORY_MASTER：' + c);
+        var stock = Number(values[rowIdx][4]) || 0;
+        if (aggDelta[c] > 0 && aggDelta[c] > stock) {
+          shortages.push(c + '：在庫 ' + stock + '、需追加扣庫 ' + aggDelta[c]);
+        }
+      }
+      if (shortages.length > 0 && !force) {
+        throw new Error('庫存不足，整批擋下：' + shortages.join('；') +
+          '（貨已實際出倉可再送一次並附 force:true）');
+      }
+      for (var c2 in aggDelta) {
+        var rowIdx2 = index[c2];
+        var after = round4_((Number(values[rowIdx2][4]) || 0) - aggDelta[c2]);
+        newStocks[rowIdx2] = [after];
+        newUpdated[rowIdx2] = [now_()];
+        var item2 = rowToItem_(values[rowIdx2]);
+        item2.stock_qty = after;
+        updatedItems.push(item2);
+      }
+      if (nRowsM > 1) {
+        master.getRange(2, 5, nRowsM - 1, 1).setValues(newStocks.slice(1));
+        master.getRange(2, 8, nRowsM - 1, 1).setValues(newUpdated.slice(1));
+      }
+
+      // 明細列覆寫 qty ＋ Amount，並寫 STOCK_LOG 修正紀錄
+      var logId_ = 'L' + Utilities.formatDate(new Date(), nowTz_(), 'yyyyMMddHHmmss') +
+        ('000' + Math.floor(Math.random() * 1000)).slice(-3);
+      var logRows = [];
+      var seq = 0;
+      var byCodeDelta = {}; // 供備註顯示合計差異
+      for (var c3 in aggDelta) byCodeDelta[c3] = 0;
+      for (var j = 0; j < lines.length; j++) {
+        var ln2 = lines[j];
+        var row2 = Number(ln2.row);
+        var x2 = byRow[row2];
+        if (!x2) continue;
+        var newQty2 = Number(ln2.qty);
+        if (newQty2 === x2.line.qty) continue;
+        byCodeDelta[x2.line.item_code] += newQty2 - x2.line.qty;
+        detSheet.getRange(row2, 5).setValue(newQty2); // Qty
+        var price = x2.line.unit_price;
+        if (price > 0) detSheet.getRange(row2, 11).setValue(round4_(price * newQty2));
+      }
+      for (var c4 in byCodeDelta) {
+        if (!byCodeDelta[c4]) continue; // 同品號多列加總後沒變 → 不寫紀錄
+        var idxM = index[c4] === undefined ? 0 : index[c4];
+        var label = c4 + (idxM && String(values[idxM][1]).trim() ? ' ' + String(values[idxM][1]).trim() : '');
+        logRows.push([
+          logId_ + ('00' + (seq + 1)).slice(-2), now_(),
+          byCodeDelta[c4] > 0 ? '出庫' : '入庫', c4, -byCodeDelta[c4], String(req.operator || '').trim() || 'HC',
+          '修正出貨單 ' + shipmentId + '：' + label + ' 出貨量調整 ' + (byCodeDelta[c4] > 0 ? '+' : '') + (-byCodeDelta[c4]),
+        ]);
+        seq++;
+      }
+      if (logRows.length > 0) {
+        var logSheet = getSheet_(SHEET_LOG);
+        logSheet.getRange(logSheet.getLastRow() + 1, 1, logRows.length, LOG_HEADERS.length)
+          .setValues(logRows);
+      }
+
+      // ③ 重算單頭統計（總款式／總件數／總箱數／金額／淨毛重）
+      var freshLines = listShipmentLines_(detSheet, shipmentId).map(function (x) { return x.line; });
+      var styles = {};
+      var pcs = 0;
+      var cartons = {};
+      var amount = 0;
+      var nw = 0;
+      var gw = 0;
+      freshLines.forEach(function (L) {
+        styles[L.item_code] = true;
+        pcs += L.qty;
+        if (L.carton_no) cartons[L.carton_no] = true;
+        amount += L.unit_price * L.qty;
+        nw += L.n_w;
+        gw += L.g_w;
+      });
+      shpSheet.getRange(hit.rowIdx + 1, 4).setValue(Object.keys(styles).length);
+      shpSheet.getRange(hit.rowIdx + 1, 5).setValue(pcs);
+      shpSheet.getRange(hit.rowIdx + 1, 14).setValue(Object.keys(cartons).length);
+      shpSheet.getRange(hit.rowIdx + 1, 15).setValue(round4_(amount));
+      shpSheet.getRange(hit.rowIdx + 1, 16).setValue(round4_(nw));
+      shpSheet.getRange(hit.rowIdx + 1, 17).setValue(round4_(gw));
+    }
+
+    return { shipment_id: shipmentId, updated: true, updated_items: updatedItems };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
+}
+
+/**
+ * 刪除出貨單（HC 限定）：主表＋明細整張刪除，各明細數量【回補庫存】並寫回補紀錄
+ * req = { action:'delete_shipment', shipment_id, operator }
+ * 回傳 { deleted, shipment_id, returned: [{item_code, item_name, qty}], restored_count }
+ */
+function deleteShipment_(req) {
+  var shipmentId = String(req.shipment_id || '').trim();
+  if (!shipmentId) throw new Error('缺少 shipment_id');
+  checkShipmentAdmin_(req.operator);
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var shpSheet = getSheet_(SHEET_SHP);
+    var hit = findShipmentRow_(shpSheet, shipmentId);
+    if (!hit) throw new Error('找不到出貨單：' + shipmentId);
+    var detSheet = getSheet_(SHEET_SHPD);
+    var detLines = listShipmentLines_(detSheet, shipmentId);
+    if (detLines.length === 0) throw new Error('出貨單 ' + shipmentId + ' 沒有任何明細列（請確認後再刪）');
+
+    // ① 回補庫存：明細各 code 合計 → 逐次性讀主檔；同 code 多列累加
+    var master = getSheet_(SHEET_MASTER);
+    var values = master.getDataRange().getValues();
+    var index = {};
+    for (var r = 1; r < values.length; r++) {
+      var k = String(values[r][0]).trim().toUpperCase();
+      if (k && !index[k]) index[k] = r;
+    }
+    var agg = {}; // code → 回補量
+    for (var i = 0; i < detLines.length; i++) {
+      var code = detLines[i].line.item_code;
+      agg[code] = (agg[code] || 0) + (Number(detLines[i].line.qty) || 0);
+    }
+    var nRows = values.length;
+    var newStocks = [];
+    var newUpdated = [];
+    for (var s = 0; s < nRows; s++) {
+      newStocks.push([Number(values[s][4]) || 0]);
+      newUpdated.push([String(values[s][7] || '')]);
+    }
+    var logRows = [];
+    var returned = [];
+    var logId_ = 'L' + Utilities.formatDate(new Date(), nowTz_(), 'yyyyMMddHHmmss') +
+      ('000' + Math.floor(Math.random() * 1000)).slice(-3);
+    var seq = 0;
+    for (var c in agg) {
+      var rowIdx = index[c];
+      if (rowIdx === undefined) continue; // 主檔已無此品號 → 只刪單不回補
+      var after = round4_((Number(values[rowIdx][4]) || 0) + agg[c]);
+      newStocks[rowIdx] = [after];
+      newUpdated[rowIdx] = [now_()];
+      var item = rowToItem_(values[rowIdx]);
+      item.stock_qty = after;
+      returned.push({ item_code: c, item_name: item.item_name, qty: agg[c] });
+      logRows.push([
+        logId_ + ('00' + (seq + 1)).slice(-2), now_(), '回補', c, agg[c], String(req.operator || '').trim() || 'HC',
+        '刪除出貨單 ' + shipmentId + '：回補 ' + c + ' ' + item.item_name + ' × ' + agg[c],
+      ]);
+      seq++;
+    }
+    if (nRows > 1) {
+      master.getRange(2, 5, nRows - 1, 1).setValues(newStocks.slice(1));
+      master.getRange(2, 8, nRows - 1, 1).setValues(newUpdated.slice(1));
+    }
+
+    // ② STOCK_LOG 一次附加（type=回補；正數＝加回庫存）
+    if (logRows.length > 0) {
+      var logSheet = getSheet_(SHEET_LOG);
+      logSheet.getRange(logSheet.getLastRow() + 1, 1, logRows.length, LOG_HEADERS.length)
+        .setValues(logRows);
+    }
+
+    // ③ 刪除明細列（由下往上刪避免位移）
+    for (var d2 = detLines.length - 1; d2 >= 0; d2--) {
+      detSheet.deleteRow(detLines[d2].row);
+    }
+    // ④ 刪除主表列
+    shpSheet.deleteRow(hit.rowIdx + 1);
+
+    return {
+      deleted: true,
+      shipment_id: shipmentId,
+      returned: returned,
+      restored_count: returned.length,
+    };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
 }
 
 /**

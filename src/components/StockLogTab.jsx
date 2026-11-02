@@ -374,7 +374,7 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
               const q = l.custQty != null ? l.custQty : Number(l.change_qty) || 0;
               const plus = q > 0;
               const typeCls =
-                l.type === '入庫' ? WO_STATUS_COLORS['已入庫'] : l.type === '盤點' ? WO_STATUS_COLORS['待確認'] : 'bg-red-100 text-red-700';
+                l.type === '入庫' ? WO_STATUS_COLORS['已入庫'] : l.type === '盤點' ? WO_STATUS_COLORS['待確認'] : l.type === '回補' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700';
               return (
                 <li key={l.log_id} className="flex items-start gap-3 px-4 py-2.5">
                   <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-extrabold ${typeCls}`}>
