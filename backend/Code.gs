@@ -431,7 +431,9 @@ function recordLog_(req) {
     throw new Error('Type 必須為：入庫 / 出庫 / 盤點，收到：' + type);
   }
   var code = String(req.item_code || '').trim();
-  if (!code) throw new Error('缺少品號 Item_Code');
+  var hasNewItem = req.new_item && typeof req.new_item === 'object';
+  // 品號留空＋附 new_item（僅入庫）＝自動編號 A####，不在此擋
+  if (!code && !(hasNewItem && type === '入庫')) throw new Error('缺少品號 Item_Code');
   var qty = Number(req.qty);
   if (isNaN(qty) || qty < 0) throw new Error('數量格式錯誤（不可為負數）');
   if (type !== '盤點' && qty <= 0) throw new Error('異動數量必須大於 0');
@@ -541,6 +543,8 @@ function batchStockTransaction_(req) {
       isNew = true;
       code = String(raw[i].new_item.item_code || '').trim().toUpperCase();
     }
+    // 品號完全留空的新品項 → 以哨兵鍵去重，稍後由 createMasterRow_ 自動編號 A####
+    if (!code && isNew) code = '#NEW#' + (i + 1);
     if (!code) throw new Error('第 ' + (i + 1) + ' 筆缺少品號 Item_Code');
     if (seenCode[code]) throw new Error('品號重複：' + code + '（批次內請合併為一筆）');
     seenCode[code] = true;
@@ -555,11 +559,12 @@ function batchStockTransaction_(req) {
   try {
     var master = getSheet_(SHEET_MASTER);
 
-    // ① 入庫新品項：先建主檔列（回帶實際品號）
+    // ① 入庫新品項：先建主檔列（品號留空 → 自動編號；回帶實際品號）
     for (var n = 0; n < details.length; n++) {
       var dNew = details[n];
       if (dNew.is_new) {
-        var newRow = createMasterRow_(master, dNew.new_item, dNew.code);
+        var hint = /^#NEW#/.test(dNew.code) ? '' : dNew.code; // 哨兵鍵 → 留空自動編號
+        var newRow = createMasterRow_(master, dNew.new_item, hint);
         dNew.code = String(master.getRange(newRow, 1).getValue()).toUpperCase();
       }
     }
