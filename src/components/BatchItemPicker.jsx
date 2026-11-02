@@ -94,9 +94,12 @@ export default function BatchItemPicker({ open, mode = 'OUT', items, force = fal
 
   function handleImport() {
     const list = [];
-    for (const it of filtered) {
-      if (sel[it.item_code] === undefined) continue;
-      const s = String(sel[it.item_code]).trim();
+    // ★ 收集「所有已勾選」的品項——不受當前搜尋／分類篩選影響：
+    //   跨搜尋勾選（搜A款勾→搜B款勾→整批帶入）不會漏掉先前的勾選
+    for (const code of checkedCodes) {
+      const it = shownStock.get(code);
+      if (!it) continue; // 品項已被清單更新移除（理論上不發生）
+      const s = String(sel[code] ?? '').trim();
       if (s === '') continue;
       const q = Number(s);
       if (!isFinite(q)) continue;
@@ -261,7 +264,15 @@ export default function BatchItemPicker({ open, mode = 'OUT', items, force = fal
                         setSel((prev) => ({ ...prev, [it.item_code]: e.target.value }))
                       }
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter') handleImport();
+                        // Enter（桌機／掃描器）只在「全部勾選列都已填好數量」時才整批帶入，
+                        // 避免鍵到一半按 Enter 造成只帶入部分品項
+                        if (e.key !== 'Enter') return;
+                        if (checkedCodes.length === 0) return;
+                        if (validCount < checkedCodes.length) {
+                          showToast(`⚠️ 尚有 ${checkedCodes.length - validCount} 款未填／超庫存，先補齊再按 Enter 整批帶入`, 'error');
+                          return;
+                        }
+                        handleImport();
                       }}
                     />
                   </div>
