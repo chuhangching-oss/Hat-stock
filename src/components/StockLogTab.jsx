@@ -81,6 +81,45 @@ const TYPE_TAGS = [
 // 日期區間快速鍵
 const PERIOD_TAGS = ['全部', '今日', '近7天', '近30天'];
 
+/** 字串跳脫（組 RegExp 用） */
+function escRe(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * 指定客人的「歸屬數量」：選了客人時，只算該客人的份額。
+ * ① 正式出貨單格式（備註「出貨 SH… ／ 客戶名」）→ 整列數量屬於該客人
+ * ② 混合備註逐段解析：『VF出貨25頂』『10/30鎮群出貨9頂』『10/30出鎮群4項』
+ *    → 只取出現該客人名稱的段落數量（可多段相加）
+ * ③ 有提到客人但解析不出數量 → 0（不落入該客人的檢索結果）
+ */
+function rowQtyForCustomer(l, name) {
+  const rm = String(l.remark || '');
+  const e = escRe(name);
+  if (!e) return 0;
+  // ① 正式出貨單：備註含「出貨 ＋ 單號 ／ 客戶名」
+  if (new RegExp(`出貨\\s*[A-Za-z]*\\d[^／]*／\\s*${e}`).test(rm)) {
+    return Math.abs(Number(l.change_qty) || 0);
+  }
+  // ② 逐段解析：『{名}出貨{數}』與『出{名}{數}』
+  let total = 0;
+  let matched = false;
+  let m;
+  let re = new RegExp(`${e}出貨\\s*([0-9.]+)`, 'g');
+  while ((m = re.exec(rm))) {
+    total += Number(m[1]) || 0;
+    matched = true;
+  }
+  re = new RegExp(`出${e}\\s*([0-9.]+)`, 'g');
+  while ((m = re.exec(rm))) {
+    total += Number(m[1]) || 0;
+    matched = true;
+  }
+  if (matched) return total;
+  // ③ 只提及但無數量 → 0（選客時不顯示）
+  return 0;
+}
+
 /**
  * 分頁：🧾 紀錄（檢索出入庫紀錄，STOCK_LOG 檢索）
  * - 關鍵字：品號 / 品名 / 顏色 / 經辦 / 備註 任一欄命中
@@ -177,32 +216,36 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
 
   const filtered = useMemo(() => {
     const f = keyword.trim().toLowerCase();
-    const cust = customer === '全部' ? '' : customer.trim().toLowerCase();
-    return sortedLogs.filter((l) => {
-      if (type !== '全部' && l.type !== type) return false;
-      const d = parseYMD(l.timestamp);
-      if (range.from && d && d < range.from) return false;
-      if (range.to && d && d > range.to) return false;
-      // 客戶篩選：比對備註（出庫紀錄備註格式＝「出貨 SH… ／ 客戶名；…」）
-      if (cust) {
-        const hit =
-          String(l.remark || '').toLowerCase().includes(cust) ||
-          String(l.item_name || '').toLowerCase().includes(cust);
-        if (!hit) return false;
-      }
-      if (!f) return true;
-      return `${l.item_code} ${l.item_name} ${l.color_spec} ${l.operator} ${l.remark} ${l.log_id}`
-        .toLowerCase()
-        .includes(f);
-    });
+    const selected = customer === '全部' ? null : customer.trim();
+    return sortedLogs
+      .filter((l) => {
+        if (type !== '全部' && l.type !== type) return false;
+        const d = parseYMD(l.timestamp);
+        if (range.from && d && d < range.from) return false;
+        if (range.to && d && d > range.to) return false;
+        if (!f) return true;
+        return `${l.item_code} ${l.item_name} ${l.color_spec} ${l.operator} ${l.remark} ${l.log_id}`
+          .toLowerCase()
+          .includes(f);
+      })
+      .map((l) => ({
+        ...l,
+        // 選了客人 → 計算「歸屬該客人的數量」；未篩＝null（用整列數量）
+        custQty: selected != null && Math.abs(Number(l.change_qty) || 0) > 0
+          ? rowQtyForCustomer(l, selected) * (Number(l.change_qty) < 0 ? -1 : 1)
+          : null,
+      }))
+      .filter((l) => !(selected != null && (l.custQty === null || Math.abs(l.custQty) <= 0)));
   }, [sortedLogs, type, range, keyword, customer]);
 
-  // 篩選範圍內合計（依正負值分加總；盤點 ± 都算進去）
+  // 篩選範圍內合計（選客人時用「歸屬數量」，未選時用整列數量；依正負分加總）
   const sum = useMemo(() => {
     let plus = 0;
     let minus = 0;
     filtered.forEach((l) => {
-      const q = Number(l.change_qty) || 0;
+      const raw = Number(l.change_qty) || 0;
+      const mag = l.custQty != null ? Math.abs(l.custQty) : Math.abs(raw);
+      const q = raw < 0 ? -mag : mag;
       if (q > 0) plus += q;
       else if (q < 0) minus += -q;
     });
@@ -328,7 +371,7 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
           </div>
           <ul className="divide-y divide-slate-100">
             {g.rows.map((l) => {
-              const q = Number(l.change_qty) || 0;
+              const q = l.custQty != null ? l.custQty : Number(l.change_qty) || 0;
               const plus = q > 0;
               const typeCls =
                 l.type === '入庫' ? WO_STATUS_COLORS['已入庫'] : l.type === '盤點' ? WO_STATUS_COLORS['待確認'] : 'bg-red-100 text-red-700';
@@ -347,6 +390,11 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
                     </p>
                     {l.remark && (
                       <p className="truncate text-[11px] font-bold text-slate-500">📝 {l.remark}</p>
+                    )}
+                    {l.custQty != null && Math.abs(l.custQty) !== Math.abs(Number(l.change_qty) || 0) && (
+                      <p className="text-[10px] font-extrabold text-blue-600">
+                        ↳ 只計此客人的份額（整列原始量 {fmtQty(Math.abs(Number(l.change_qty)))}）
+                      </p>
                     )}
                   </div>
                   <span
