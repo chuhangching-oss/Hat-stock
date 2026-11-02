@@ -75,6 +75,7 @@ export default function ShipmentTab({
   const manager = isManager();
   const [shipList, setShipList] = useState(null); // null = 未載入
   const [shipFilter, setShipFilter] = useState('');
+  const [shipOpFilter, setShipOpFilter] = useState('全部'); // 經辦人篩選
   const [shipDetail, setShipDetail] = useState(null); // {order, lines}
   const [shipEdit, setShipEdit] = useState({}); // 單頭欄位編輯值
   const [shipLineQty, setShipLineQty] = useState({}); // row(明細列號) → 新數量字串
@@ -116,8 +117,15 @@ export default function ShipmentTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** 展開單張出貨單詳情（單頭×明細，含試算表列號） */
-  async function openShipment(o) {
+  /** 經辦人快選（從清單聚合，JL 等使用者直接篩） */
+  const shipOperators = useMemo(() => {
+    const set = new Set(
+      (shipList || []).map((o) => String(o.operator || '').trim()).filter((x) => x && x !== '—'),
+    );
+    return [...set];
+  }, [shipList]);
+
+  /** 展開單張出貨單詳情（單頭×明細，含試算表列號） */  async function openShipment(o) {
     setShipDetail({ order: { ...o, _loading: true }, lines: [] });
     setShipEdit({});
     setShipLineQty({});
@@ -125,6 +133,7 @@ export default function ShipmentTab({
     setShipDelArm(false);
     try {
       const res = await gasRequest(getGasUrl(), { action: 'get_shipment', shipment_id: o.shipment_id });
+      setShipDetail({ ...res, order: { ...res.order, operator: o.operator || '—' } });
       setShipDetail(res);
       setShipEdit({
         shipment_date: res.order.shipment_date || '',
@@ -733,16 +742,29 @@ export default function ShipmentTab({
             <>
               <input
                 className="field-input"
-                placeholder="搜尋：單號 SH… / 客戶 / Invoice…"
+                placeholder="搜尋：單號 SH… / 客戶 / Invoice… / 經辦"
                 value={shipFilter}
                 onChange={(e) => setShipFilter(e.target.value)}
               />
+              {shipOperators.length > 0 && (
+                <select
+                  className="field-input"
+                  value={shipOpFilter}
+                  onChange={(e) => setShipOpFilter(e.target.value)}
+                >
+                  <option value="全部">經辦：全部（{shipOperators.length} 人）</option>
+                  {shipOperators.map((p) => (
+                    <option key={p} value={p}>👤 {p}</option>
+                  ))}
+                </select>
+              )}
               <ul className="divide-y divide-slate-100 overflow-hidden rounded-2xl border border-slate-100">
                 {shipList
                   .filter((o) => {
                     const f = shipFilter.trim().toLowerCase();
+                    if (shipOpFilter !== '全部' && String(o.operator || '') !== shipOpFilter) return false;
                     if (!f) return true;
-                    return `${o.shipment_id} ${o.customer_name} ${o.invoice_no} ${o.shipment_date} ${o.remark}`
+                    return `${o.shipment_id} ${o.customer_name} ${o.invoice_no} ${o.shipment_date} ${o.remark} ${o.operator}`
                       .toLowerCase()
                       .includes(f);
                   })
@@ -760,6 +782,7 @@ export default function ShipmentTab({
                             {o.shipment_date || '—'} · {o.total_styles} 款 · {fmtQty(o.total_pcs)} PCS
                             {o.total_amount ? ` · $${fmtQty(o.total_amount)}` : ''}
                             {o.invoice_no ? ` · ${o.invoice_no}` : ''} · {o.status || ''}
+                            {o.operator && o.operator !== '—' ? ` · 👤${o.operator}` : ''}
                           </span>
                         </span>
                         <span className="shrink-0 text-xs font-extrabold text-slate-400">✏️ / 🗑</span>
@@ -768,7 +791,7 @@ export default function ShipmentTab({
                   ))}
               </ul>
               <p className="px-1 text-[10px] font-bold text-slate-400">
-                顯示最近 100 張內、搜尋後前 50 張。點任一張可編輯單頭／明細數量，或刪除整張（庫存自動回補）
+                顯示最近 100 張內、篩後前 50 張。點任一張可編輯單頭／明細數量，或刪除整張（庫存自動回補）
               </p>
             </>
           )}
@@ -830,9 +853,14 @@ export default function ShipmentTab({
           >
             {/* 標題 */}
             <div className="flex items-center justify-between border-b border-slate-100 p-4 pb-3">
-              <h3 className="truncate text-lg font-extrabold">
-                ✏️ 出貨單 {shipDetail.order.shipment_id}
-              </h3>
+              <div className="min-w-0">
+                <h3 className="truncate text-lg font-extrabold">
+                  ✏️ 出貨單 {shipDetail.order.shipment_id}
+                </h3>
+                {shipDetail.order.operator && shipDetail.order.operator !== '—' && (
+                  <p className="text-[11px] font-bold text-slate-400">👤 經辦：{shipDetail.order.operator}</p>
+                )}
+              </div>
               <button className="text-slate-400" onClick={() => !shipBusy && setShipDetail(null)}>✕</button>
             </div>
 

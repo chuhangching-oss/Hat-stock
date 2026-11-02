@@ -1491,6 +1491,28 @@ function listShipments_() {
     });
   }
   rows.sort(function (a, b) { return String(b.shipment_id).localeCompare(String(a.shipment_id)); });
+
+  // 經辦人標註：SHIPMENT_ORDERS 沒有經辦欄 → 從 STOCK_LOG 的出庫列
+  //（備註「出貨 SH… ／ 客戶」）反查每張單的經辦人（讀最近 3000 筆，更舊的單標 '—'）
+  try {
+    var logSheet2 = getSheet_(SHEET_LOG);
+    var last2 = logSheet2.getLastRow();
+    if (last2 >= 2) {
+      var startRow2 = Math.max(2, last2 - 2999);
+      var num2 = last2 - startRow2 + 1;
+      var lv = logSheet2.getRange(startRow2, 1, num2, LOG_HEADERS.length).getValues();
+      var ops = {};
+      for (var li = 0; li < lv.length; li++) {
+        if (String(lv[li][2]).trim() !== '出庫') continue;
+        var mm = String(lv[li][6] || '').trim().match(/^出貨\s*(SH[^\s／]*?)\s*／/);
+        if (mm && mm[1] && !ops[mm[1]]) ops[mm[1]] = String(lv[li][5]).trim() || '—';
+      }
+      rows.forEach(function (rw) {
+        rw.operator = ops[rw.shipment_id] || '—';
+      });
+    }
+  } catch (e) { /* 讀不到紀錄就不標經辦 */ }
+
   return rows;
 }
 
