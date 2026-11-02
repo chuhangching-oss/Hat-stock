@@ -18,7 +18,7 @@ const TYPE_TAGS = [
 const PERIOD_TAGS = ['全部', '今日', '近7天', '近30天'];
 
 /**
- * 分頁：🧾 異動記錄（STOCK_LOG 檢索）
+ * 分頁：🧾 紀錄（檢索出入庫紀錄，STOCK_LOG 檢索）
  * - 關鍵字：品號 / 品名 / 顏色 / 經辦 / 備註 任一欄命中
  * - 類型篩選：全部 / 入庫 / 出庫 / 盤點
  * - 日期區間：全部 / 今日 / 近7天 / 近30天
@@ -103,7 +103,7 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
       {/* ===== 標題列 ===== */}
       <div className="flex items-center justify-between gap-2 px-1">
         <div>
-          <h2 className="text-lg font-extrabold text-slate-900">🧾 異動記錄</h2>
+          <h2 className="text-lg font-extrabold text-slate-900">🔍 檢索出入庫紀錄</h2>
           <p className="text-xs font-bold text-slate-400">
             共 {filtered.length} 筆（最近 {logs.length} 筆範圍內）
           </p>

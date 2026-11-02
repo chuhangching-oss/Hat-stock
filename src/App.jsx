@@ -23,7 +23,7 @@ const TABS = [
   { key: 'pwo', label: '生產工令', icon: '🏭', managerOnly: false },
   { key: 'wo', label: '工單管理', icon: '📋', managerOnly: false },
   { key: 'ship', label: '出庫出貨', icon: '🚢', managerOnly: false },
-  { key: 'logs', label: '異動', icon: '🧾', managerOnly: false },
+  { key: 'logs', label: '紀錄', icon: '🧾', managerOnly: false },
   { key: 'book', label: '款式圖鑑', icon: '🧢', managerOnly: false },
   { key: 'report', label: '營運報表', icon: '📊', managerOnly: true },
   { key: 'settings', label: '設定', icon: '⚙️', managerOnly: false },
