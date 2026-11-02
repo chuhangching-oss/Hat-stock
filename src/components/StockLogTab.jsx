@@ -6,6 +6,32 @@ function fmtQty(n) {
   return Math.round(Number(n) * 10000) / 10000;
 }
 
+/** Timestamp → 'YYYY-MM-DD'：
+ *  - Google Sheets 會把「2026-10-29 14:50:30」自動轉成日期型值，
+ *    讀回來變 'Wed Oct 29 2026 14:50:30 GMT+0800…' 兩種格式都要能解析 */
+function parseYMD(ts) {
+  const s = String(ts || '').trim();
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+  return '';
+}
+
+/** Timestamp → 'HH:mm'（分組內顯示用） */
+function parseHM(ts) {
+  const s = String(ts || '').trim();
+  let m = s.match(/^\d{4}-\d{2}-\d{2}[ T](\d{1,2}:\d{2})/);
+  if (m) return m[1];
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) {
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+  return ''; // 解析失敗就不顯示時間
+}
+
 // 類型 chips 設定（異動記錄 Type 只會有三種值）
 const TYPE_TAGS = [
   { key: '全部', icon: '', color: 'bg-blue-700 text-white' },
@@ -33,14 +59,28 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
   const [customer, setCustomer] = useState('全部');
   const [customers, setCustomers] = useState([]); // 客戶清單（客戶篩選下拉用）
 
-  // 讀客戶清單（只讀一次；讀失敗不擋本頁，只是不顯示客戶篩選）
+  // 客戶候選來源＝客戶清單（CUSTOMERS）＋歷史出貨單出現過的客戶（SHIPMENT_ORDERS）
+  // 任一來源讀不到不影响本頁；兩個都空 → 不顯示客戶下拉（用關鍵字搜備註）
   useEffect(() => {
     let alive = true;
-    gasRequest(getGasUrl(), { action: 'list_customers' })
-      .then((list) => {
-        if (alive && Array.isArray(list)) setCustomers(list);
-      })
-      .catch(() => { /* 客戶表讀不到 → 不顯示客戶篩選 */ });
+    Promise.allSettled([
+      gasRequest(getGasUrl(), { action: 'list_customers' }),
+      gasRequest(getGasUrl(), { action: 'list_shipments' }),
+    ]).then(([custRes, shipRes]) => {
+      if (!alive) return;
+      const byName = new Map();
+      const add = (name, country = '') => {
+        const key = String(name || '').trim().toUpperCase();
+        if (key && !byName.has(key)) byName.set(key, { customer_id: key, customer_name: String(name).trim(), country });
+      };
+      if (custRes.status === 'fulfilled' && Array.isArray(custRes.value)) {
+        custRes.value.forEach((c) => add(c.customer_name, c.country || ''));
+      }
+      if (shipRes.status === 'fulfilled' && Array.isArray(shipRes.value)) {
+        shipRes.value.forEach((s) => add(s.customer_name));
+      }
+      setCustomers([...byName.values()]);
+    });
     return () => {
       alive = false;
     };
@@ -77,7 +117,7 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
     const cust = customer === '全部' ? '' : customer.trim().toLowerCase();
     return logs.filter((l) => {
       if (type !== '全部' && l.type !== type) return false;
-      const d = String(l.timestamp || '').slice(0, 10);
+      const d = parseYMD(l.timestamp);
       if (range.from && d && d < range.from) return false;
       if (range.to && d && d > range.to) return false;
       // 客戶篩選：比對備註（出庫紀錄備註格式＝「出貨 SH… ／ 客戶名；…」）
@@ -111,7 +151,7 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
     const out = [];
     let cur = null;
     filtered.forEach((l) => {
-      const d = String(l.timestamp || '').slice(0, 10) || '（無日期）';
+      const d = parseYMD(l.timestamp) || '（無日期）';
       if (!cur || cur.date !== d) {
         cur = { date: d, rows: [] };
         out.push(cur);
@@ -184,6 +224,11 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
             </button>
           ))}
         </div>
+        {customers.length === 0 && (
+          <p className="px-1 text-[10px] font-bold text-slate-400">
+            💡 想用「客戶」篩選：先在「出庫出貨」分頁建立／出貨選客戶——出過貨的客戶會自動出現在篩選下拉
+          </p>
+        )}
         <div className="flex flex-wrap gap-1.5 border-t border-slate-100 pt-2">
           {PERIOD_TAGS.map((p) => (
             <button
@@ -235,7 +280,7 @@ export default function StockLogTab({ logs, loading, error, refresh, showToast }
                       {l.color_spec && <span className="text-slate-500">（{l.color_spec}）</span>}
                     </p>
                     <p className="font-mono text-[11px] text-slate-400">
-                      {l.item_code} · {String(l.timestamp).slice(11)} · {l.operator || '—'}
+                      {l.item_code} · {parseHM(l.timestamp)} · {l.operator || '—'}
                     </p>
                     {l.remark && (
                       <p className="truncate text-[11px] font-bold text-slate-500">📝 {l.remark}</p>
