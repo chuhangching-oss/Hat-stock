@@ -304,7 +304,21 @@ function doPost(e) {
         data = shipProductionOrder_(req);
         break;
       default:
-        throw new Error('未知的 action：' + req.action + '（可用：ping / list / get / log / upload_photo）');
+        throw new Error(
+          '未知的 action：' + req.action +
+          ' ← 線上後端是舊版（frontend 期待的 action 不存在）。' +
+          '新版後端支援：/' +
+          [
+            'ping', 'list', 'get', 'log', 'list_operators', 'upload_photo',
+            'list_work_orders', 'list_bom', 'create_work_order', 'complete_work_order',
+            'ship_work_order', 'list_customers', 'add_customer', 'create_shipment',
+            'list_shipments', 'getSalesReport', 'batchStockTransaction',
+            'update_item_info', 'public_lookbook', 'list_yarn', 'save_yarn',
+            'list_production_orders', 'create_production_order', 'start_production_order',
+            'complete_production_order', 'ship_production_order',
+          ].join(' / ') +
+          '。請在 Apps Script 編輯器：部署 → 管理部署作業 → 編輯(筆) → 版本選「新版本」→ 部署',
+        );
     }
     return makeResponse_({ ok: true, data: data });
   } catch (err) {
