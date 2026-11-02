@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import useInventory from './hooks/useInventory';
 import useWorkOrders from './hooks/useWorkOrders';
 import useProduction from './hooks/useProduction';
+import useStockLogs from './hooks/useStockLogs';
 import { gasRequest, getGasUrl, isManager } from './api';
 import SearchTab from './components/SearchTab';
 import ActionTab from './components/ActionTab';
@@ -11,6 +12,7 @@ import ShipmentTab from './components/ShipmentTab';
 import AnalyticsTab from './components/AnalyticsTab';
 import LookbookTab from './components/LookbookTab';
 import LookbookPublic from './components/LookbookPublic';
+import StockLogTab from './components/StockLogTab';
 import SettingsTab from './components/SettingsTab';
 import Scanner from './components/Scanner';
 import Toast from './components/Toast';
@@ -21,6 +23,7 @@ const TABS = [
   { key: 'pwo', label: '生產工令', icon: '🏭', managerOnly: false },
   { key: 'wo', label: '工單管理', icon: '📋', managerOnly: false },
   { key: 'ship', label: '出庫出貨', icon: '🚢', managerOnly: false },
+  { key: 'logs', label: '異動', icon: '🧾', managerOnly: false },
   { key: 'book', label: '款式圖鑑', icon: '🧢', managerOnly: false },
   { key: 'report', label: '營運報表', icon: '📊', managerOnly: true },
   { key: 'settings', label: '設定', icon: '⚙️', managerOnly: false },
@@ -35,6 +38,7 @@ export default function App() {
   const inventory = useInventory();
   const workOrders = useWorkOrders();
   const production = useProduction();
+  const logs = useStockLogs();
   const [tab, setTab] = useState('search');
   const [query, setQuery] = useState(''); // 查詢頁搜尋字
   const [toast, setToast] = useState(null); // { type: 'success'|'error', msg }
@@ -80,12 +84,13 @@ export default function App() {
     [inventory],
   );
 
-  // 頂部「同步」按鈕：庫存主檔＋工作令＋生產工令一起重拉
+  // 頂部「同步」按鈕：庫存主檔＋工作令＋生產工令＋異動記錄一起重拉
   const handleSync = useCallback(() => {
     inventory.refresh();
     workOrders.refresh();
     production.refresh();
-  }, [inventory, workOrders, production]);
+    logs.refresh();
+  }, [inventory, workOrders, production, logs]);
 
   // 出入庫單筆送出（ActionTab「直接入庫新品項」呼叫）
   const handleSubmitLog = useCallback(
@@ -99,13 +104,14 @@ export default function App() {
           `✅ ${payload.type}成功：${it.item_code} ${nameWithColor} → 目前庫存 ${it.stock_qty} ${it.unit}`,
           'success',
         );
+        logs.refresh(); // 異動記錄分頁保持最新
         return res;
       } catch (e) {
         showToast(`❌ 送出失敗：${e.message}`, 'error');
         throw e; // 拋回讓 ActionTab 保持彈窗、顯示錯誤
       }
     },
-    [inventory, showToast],
+    [inventory, logs, showToast],
   );
 
   // 批次出入庫送出（ActionTab 購物車模式呼叫）
@@ -122,13 +128,14 @@ export default function App() {
           `${payload.type === '出庫' ? '📤' : payload.type === '盤點' ? '🧮' : '📥'} 批次${res.type}成功：` +
             `${res.total_items} 項 ${res.total_qty} 件${shipPart}`,
         );
+        logs.refresh(); // 異動記錄分頁保持最新
         return res;
       } catch (e) {
         showToast(`❌ 批次送出失敗：${e.message}`, 'error');
         throw e; // 拋回讓 ActionTab 保持彈窗
       }
     },
-    [inventory, showToast],
+    [inventory, logs, showToast],
   );
 
   // ===== 工作令（WorkOrderTab 呼叫） =====
@@ -378,6 +385,15 @@ export default function App() {
             onItemsUpdated={inventory.applyItem}
             onOpenScanner={() => openScanner('ship')}
             goToSettings={() => setTab('settings')}
+          />
+        )}
+        {tab === 'logs' && (
+          <StockLogTab
+            logs={logs.logs}
+            loading={logs.loading}
+            error={logs.error}
+            refresh={logs.refresh}
+            showToast={showToast}
           />
         )}
         {tab === 'book' && (

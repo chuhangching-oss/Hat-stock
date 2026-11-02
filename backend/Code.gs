@@ -67,7 +67,13 @@
  *       operator 非 HC/MAIN（不分大小寫、允許「01-HC」等名冊格式）→ 拋出權限拒絕
  *       （Apps Script 無法設 HTTP 狀態碼，回應為 ok:false error:「權限不足…」，
  *         前端一律以錯誤處理，絕不回傳任何營業額或匯總資料）
- *       彙總來源：SHIPMENT_ORDERS（客戶/金額/箱重）＋ SHIPMENT_DETAILS（款式排行）
+ * 彙總來源：SHIPMENT_ORDERS（客戶/金額/箱重）＋ SHIPMENT_DETAILS（款式排行）
+ *
+ *   { action: "list_stock_logs", limit? }           → 出入庫異動記錄檢索（STOCK_LOG）
+ *       只讀最後 N 筆（limit 預設 500、最多 2000），由新到舊；
+ *       回傳 { log_id, timestamp, type(入庫/出庫/盤點), item_code,
+ *              item_name, color_spec, unit, change_qty, operator, remark }
+ *       （品名/顏色/單位由主檔帶入；篩選由前端做）
  *
  *   { action: "update_item_info", item_code,
  *     image_url?, style_category?, season?,      → 更新品項圖鑑資訊（缺的欄不動）
@@ -303,6 +309,9 @@ function doPost(e) {
       case 'ship_production_order':
         data = shipProductionOrder_(req);
         break;
+      case 'list_stock_logs':
+        data = listStockLogs_(req);
+        break;
       default:
         throw new Error(
           '未知的 action：' + req.action +
@@ -315,7 +324,7 @@ function doPost(e) {
             'list_shipments', 'getSalesReport', 'batchStockTransaction',
             'update_item_info', 'public_lookbook', 'list_yarn', 'save_yarn',
             'list_production_orders', 'create_production_order', 'start_production_order',
-            'complete_production_order', 'ship_production_order',
+            'complete_production_order', 'ship_production_order', 'list_stock_logs',
           ].join(' / ') +
           '。請在 Apps Script 編輯器：部署 → 管理部署作業 → 編輯(筆) → 版本選「新版本」→ 部署',
         );
@@ -1392,6 +1401,51 @@ function checkReportPerm_(operator) {
     throw new Error('權限不足：僅限管理者（HC / MAIN）查閱營運報表。' +
       '目前身分：' + (String(operator || '').trim() || '未填經辦人'));
   }
+}
+
+/**
+ * 出入庫異動記錄檢索（STOCK_LOG）：
+ * req = { action:'list_stock_logs', limit?: 預設 500（最多 2000） }
+ * - 只讀最後 N 筆（老表不會越長越慢）；由新到舊排序
+ * - 帶入品名／顏色／單位（主檔查表），前端可直接顯示與篩選
+ * - 依 Timestamp 排序（格式 yyyy-MM-dd HH:mm:ss），無 Timestamp 的空列略過
+ */
+function listStockLogs_(req) {
+  var limit = Math.min(Math.max(Number(req.limit) || 500, 1), 2000);
+  var logSheet = getSheet_(SHEET_LOG);
+  var last = logSheet.getLastRow();
+  if (last < 2) return [];
+  var startRow = Math.max(2, last - limit + 1);
+  var num = last - startRow + 1;
+  var values = logSheet.getRange(startRow, 1, num, LOG_HEADERS.length).getValues();
+
+  // 主檔查表：品名／顏色／單位
+  var master = {};
+  listMaster_().forEach(function (it) {
+    master[String(it.item_code).toUpperCase()] = it;
+  });
+
+  var rows = [];
+  for (var i = values.length - 1; i >= 0; i--) {
+    var ts = String(values[i][1]).trim();
+    var code = String(values[i][3]).trim();
+    if (!code && !ts) continue; // 空列
+    var it = master[code.toUpperCase()] || null;
+    rows.push({
+      log_id: String(values[i][0]).trim(),
+      timestamp: ts,
+      type: String(values[i][2]).trim(),
+      item_code: code,
+      item_name: it ? it.item_name : '(品號已刪除)',
+      color_spec: it ? it.color_spec : '',
+      unit: it ? it.unit : 'PCS',
+      change_qty: Number(values[i][4]) || 0,
+      operator: String(values[i][5]).trim(),
+      remark: String(values[i][6]).trim(),
+    });
+  }
+  rows.sort(function (a, b) { return String(b.timestamp).localeCompare(String(a.timestamp)); });
+  return rows;
 }
 
 /** 出貨單主表（由新到舊排序；匯出 Commercial Invoice / Packing List 用） */
