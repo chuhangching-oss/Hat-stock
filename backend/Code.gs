@@ -568,6 +568,7 @@ function batchStockTransaction_(req) {
       if (type === '出庫') {
         var curStock = Number(values[dIdx.rowIdx][4]) || 0;
         if (dIdx.qty > curStock) {
+          dIdx.short = true; // 補帳模式（force）時以此標記負庫存品項
           shortages.push(dIdx.code + ' ' + String(values[dIdx.rowIdx][1]).trim() +
             '：在庫 ' + curStock + '、欲出庫 ' + dIdx.qty);
         }
@@ -615,6 +616,9 @@ function batchStockTransaction_(req) {
       var lineRemark = remark;
       if (outCustomer) {
         lineRemark = '出貨 ' + shipmentId + ' ／ ' + outCustomer + (remark ? '；' + remark : '');
+      }
+      if (d.short) {
+        lineRemark = '⚠️負庫存待盤' + (lineRemark ? '；' + lineRemark : '');
       }
       logRows.push([
         logId + ('00' + (t + 1)).slice(-2), now_(), type, d.code, change, operator, lineRemark,
@@ -667,6 +671,7 @@ function batchStockTransaction_(req) {
       total_qty: round4_(totalQty),
       updated_items: updatedItems,
       shipment_id: shipmentId || undefined,
+      short_count: details.filter(function (d) { return d.short; }).length,
     };
   } finally {
     try {

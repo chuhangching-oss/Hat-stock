@@ -124,9 +124,13 @@ export default function App() {
         });
         (res.updated_items || []).forEach((it) => inventory.applyItem(it));
         const shipPart = res.shipment_id ? `，已建立出貨單 ${res.shipment_id}` : '';
+        const shortPart =
+          payload.type === '出庫' && res.short_count
+            ? `（⚠️ ${res.short_count} 項負庫存待盤）`
+            : '';
         showToast(
           `${payload.type === '出庫' ? '📤' : payload.type === '盤點' ? '🧮' : '📥'} 批次${res.type}成功：` +
-            `${res.total_items} 項 ${res.total_qty} 件${shipPart}`,
+            `${res.total_items} 項 ${res.total_qty} 件${shipPart}${shortPart}`,
         );
         logs.refresh(); // 異動記錄分頁保持最新
         return res;

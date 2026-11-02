@@ -91,6 +91,8 @@ export default function ActionTab({
   const [qty, setQty] = useState('');
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  // 補帳模式（僅出庫）：貨已實際出倉但帳面庫存不足 → 允許負庫存整批送出（後端 force）
+  const [force, setForce] = useState(false);
   const qtyRef = useRef(null);
 
   // ===== 單頭 =====
@@ -207,7 +209,7 @@ export default function ActionTab({
     mode === 'OUT' ? (custIsManual ? newCustName.trim() : custName.trim()) : '';
 
   const allFilled = lines.length > 0 && lines.every((l) => (mode === 'COUNT' ? isFinite(Number(l.qty)) && Number(l.qty) >= 0 : lineQtyValid(l)));
-  const canSubmit = allFilled && overLines.length === 0 && !!operator.trim();
+  const canSubmit = allFilled && (mode !== 'OUT' || force || overLines.length === 0) && !!operator.trim();
 
   // 新品項（單筆入庫）：以草稿資料當作料件（庫存由 0 起算）
   const newItem = { ...draft, stock_qty: 0, unit: draft.unit.trim() || 'PCS' };
@@ -243,7 +245,8 @@ export default function ActionTab({
     if (busy) return;
     if (!lines.length) return showToast('❌ 清單尚未加入任何品項', 'error');
     if (!allFilled) return showToast('❌ 尚有品項未填數量（盤點可為 0）', 'error');
-    if (overLines.length > 0) return showToast(`❌ ${overLines.length} 列出庫量大於在庫量，已阻擋送出`, 'error');
+    if (overLines.length > 0 && !force)
+      return showToast(`❌ ${overLines.length} 列出庫量大於在庫量——貨其實已出倉的話，可勾下方「🩹 補帳模式」送出`, 'error');
     if (!operator.trim()) return showToast('❌ 請填寫經辦人姓名（送出前必填）', 'error');
     setConfirmOpen(true);
   }
@@ -282,6 +285,7 @@ export default function ActionTab({
         customer: mode === 'OUT' ? finalCustomer : '',
         operator: operator.trim(),
         remark: remark.trim(),
+        force: mode === 'OUT' && force, // 補帳模式：允許負庫存（後端自動標註「⚠️負庫存待盤」）
         items: lines.map((l) => ({ item_code: l.item.item_code, qty: Number(l.qty) })),
       });
       try {
@@ -361,6 +365,7 @@ export default function ActionTab({
               setMode(m.key);
               setSelected(null);
               setQty('');
+              setForce(false); // 切換模式時關閉補帳模式
               if (newOpen) closeNew();
             }}
             className={`min-h-touch rounded-2xl text-xl font-extrabold transition active:scale-95 ${
@@ -764,9 +769,24 @@ export default function ActionTab({
               </p>
             )}
             {overLines.length > 0 && (
-              <p className="mt-1 px-1 text-xs font-extrabold text-red-600">
-                ⚠️ {overLines.length} 列出庫量大於在庫量，已阻擋送出
-              </p>
+              <div className="mt-1 space-y-1 px-1">
+                <p className="text-xs font-extrabold text-red-600">
+                  ⚠️ {overLines.length} 列出庫量大於在庫量——
+                  {force ? '目前為「補帳模式」，會以負庫存送出' : '已阻擋送出'}
+                </p>
+                <label className="flex cursor-pointer items-start gap-2 rounded-2xl bg-amber-50 px-3 py-2 ring-1 ring-amber-200">
+                  <input
+                    type="checkbox"
+                    checked={force}
+                    onChange={(e) => setForce(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 accent-amber-600"
+                  />
+                  <span className="text-[11px] font-bold leading-snug text-amber-800">
+                    🩹 補帳模式：貨其實已出倉，只是帳面庫存不足？
+                    <br />勾起來就允許這批以負庫存送出，備註會自動標「⚠️負庫存待盤」（之後盤點校正）
+                  </span>
+                </label>
+              </div>
             )}
             {/* 不用 disabled：按下時永遠給理由提示（避免「點了沒反應」像當機） */}
             <button
@@ -784,6 +804,7 @@ export default function ActionTab({
         open={batchOpen}
         mode={mode}
         items={items}
+        force={mode === 'OUT' && force}
         showToast={showToast}
         onClose={() => setBatchOpen(false)}
         onPick={pickLines}
@@ -931,6 +952,9 @@ export default function ActionTab({
           {mode === 'OUT' && <Row label="客戶" value={finalCustomer || '（不建立出貨單）'} />}
           <Row label="經辦人" value={operator || '—'} />
           {remark.trim() && <Row label="備註 / 箱號" value={remark.trim()} />}
+          {force && overLines.length > 0 && (
+            <Row label="補帳模式" value={`⚠️ ${overLines.length} 項以負庫存扣（備註標「負庫存待盤」）`} cls="text-amber-600" />
+          )}
           <Row label="總品項數" value={`${lines.length} 項（${styleCount} 款）`} />
           <Row label="總件數" value={`${fmtQty(totalQty)} PCS`} strong />
         </div>
