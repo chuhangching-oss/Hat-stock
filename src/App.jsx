@@ -137,26 +137,57 @@ export default function App() {
   // 批次出入庫送出（ActionTab 購物車模式呼叫）
   const handleBatchSubmit = useCallback(
     async (payload) => {
+      // 批次 payload 的 type 是 IN／OUT／盤點 → 先正規化成後端的 入庫／出庫／盤點
+      const type = payload.type === 'IN' ? '入庫' : payload.type === 'OUT' ? '出庫' : payload.type;
+      // ===== 樂観更新：先以本地庫存試算「送出後」數字，立刻反映在畫面 =====
+      // - 既有料件：入庫＝原庫＋數量、出庫＝原庫−數量（補帳可負）、盤點＝盤後值
+      // - 新品項（item_code 留空自動編號）無法本地預知品號 → 等後端回應再插入
+      const prevByCode = new Map(); // code -> 送出前的 item（失敗 rollback 用）
+      const round4 = (v) => Math.round(Number(v) * 10000) / 10000;
+      const stamp = () => {
+        const d = new Date();
+        const p = (n) => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+      };
+      const findByCode = (code) => {
+        const t = String(code || '').trim().toLowerCase();
+        return (
+          inventory.items.find((it) => String(it.item_code).trim().toLowerCase() === t) || null
+        );
+      };
+      payload.items.forEach((line) => {
+        if (line.new_item) return; // 新品項：等後端自動編號後再套用
+        const cur = findByCode(line.item_code);
+        if (!cur) return;
+        const curQty = Number(cur.stock_qty) || 0;
+        const q = Number(line.qty) || 0;
+        const after = type === '入庫' ? curQty + q
+          : type === '出庫' ? curQty - q
+          : q; // 盤點＝盤後實際庫存量
+        prevByCode.set(String(cur.item_code), cur);
+        inventory.applyItem({ ...cur, stock_qty: round4(after), last_updated: stamp() });
+      });
       try {
         const res = await gasRequest(getGasUrl(), {
           action: 'batchStockTransaction',
           ...payload,
         });
+        // 以後端回應為準校正（含自動編號後的新品項）
         (res.updated_items || []).forEach((it) => inventory.applyItem(it));
         const shipPart = res.shipment_id ? `，已建立出貨單 ${res.shipment_id}` : '';
         const shortPart =
-          payload.type === '出庫' && res.short_count
-            ? `（⚠️ ${res.short_count} 項負庫存待盤）`
-            : '';
+          type === '出庫' && res.short_count ? `（⚠️ ${res.short_count} 項負庫存待盤）` : '';
         showToast(
-          `${payload.type === '出庫' ? '📤' : payload.type === '盤點' ? '🧮' : '📥'} 批次${res.type}成功：` +
+          `${type === '出庫' ? '📤' : type === '盤點' ? '🧮' : '📥'} 批次${res.type}成功：` +
             `${res.total_items} 項 ${res.total_qty} 件${shipPart}${shortPart}`,
         );
         logs.refresh(); // 異動記錄分頁保持最新
         return res;
       } catch (e) {
+        // 後端拒絕（庫存不足／斷線／逾時…）→ 把樂観更新的庫存還原回送出前狀態
+        prevByCode.forEach((orig) => inventory.applyItem(orig));
         showToast(`❌ 批次送出失敗：${e.message}`, 'error');
-        throw e; // 拋回讓 ActionTab 保持彈窗
+        throw e; // 拋回讓 ActionTab 還原暫存清單與彈窗
       }
     },
     [inventory, logs, showToast],
