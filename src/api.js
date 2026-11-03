@@ -17,9 +17,15 @@ export function setGasUrl(url) {
   localStorage.setItem(GAS_URL_KEY, (url || '').trim());
 }
 
-/** 存取碼（與 Code.gs 的 API_TOKEN 相同時才可通） */
+/** 存取碼（與 Code.gs 的 API_TOKEN 相同時才可通）
+ *  🔒 2026-11 起「內建」存取碼：一般人不需要填、也看不到（設定頁已隱藏）；
+ *  僅 HC/MAIN 可在設定頁自訂覆寫（對應後端 API_TOKEN 輪替）。 */
+const DEFAULT_TOKEN = 'GU3132';
+
 export function getToken() {
-  return localStorage.getItem(TOKEN_KEY) || '';
+  // 一般使用者一律用內建碼（就算 localStorage 殘留舊值也自動導正）
+  if (!isManager()) return DEFAULT_TOKEN;
+  return localStorage.getItem(TOKEN_KEY) || DEFAULT_TOKEN;
 }
 
 export function setToken(token) {

@@ -7,25 +7,28 @@ import {
   getToken,
   setToken,
   testConnection,
+  isManager,
 } from '../api';
 
 /**
  * 分頁 3：設定
  * - Apps Script Web App 網址（存在手機 localStorage）
- * - 存取碼（對應 Code.gs 的 API_TOKEN，未設可不填）
+ * - 存取碼：🔒 已內建，僅 HC/MAIN 可查看／覆寫（一般使用者不顯示此欄）
  * - 經辦人預設姓名
  * - 連線測試
  */
 export default function SettingsTab({ showToast, onSaved }) {
+  const manager = isManager();
   const [url, setUrl] = useState(getGasUrl());
   const [name, setName] = useState(getOperator());
   const [token, setTok] = useState(getToken());
+  const [showToken, setShowToken] = useState(false); // 存取碼遮蔽切換（僅 HC/MAIN）
   const [testing, setTesting] = useState(false);
 
   async function handleSave() {
     setGasUrl(url);
     setOperator(name);
-    setToken(token);
+    if (manager) setToken(token); // 一般人固定用內建存取碼，不寫入 localStorage
     showToast('已儲存設定');
     setTesting(true);
     try {
@@ -54,18 +57,34 @@ export default function SettingsTab({ showToast, onSaved }) {
             ★ 網址必須以 <b>/exec</b> 結尾（不是 /dev）。下方部署教學有完整步驟。
           </p>
         </div>
-        <div>
-          <label className="field-label">存取碼（後端有設定 API_TOKEN 時才需填）</label>
-          <input
-            className="field-input"
-            placeholder="後端 Code.gs 的 API_TOKEN，例：帽廠2026"
-            value={token}
-            onChange={(e) => setTok(e.target.value)}
-          />
-          <p className="mt-1 text-xs text-slate-400">
-            ★ 建議與後端一起設定：網址外流時，沒有存取碼也無法讀寫庫存。
-          </p>
-        </div>
+        {manager ? (
+          <div>
+            <label className="field-label">存取碼（對應後端 API_TOKEN；僅 HC/MAIN 可見）</label>
+            <div className="flex gap-2">
+              <input
+                className="field-input flex-1"
+                type={showToken ? 'text' : 'password'}
+                placeholder="與後端 Code.gs 的 API_TOKEN 一致"
+                value={token}
+                onChange={(e) => setTok(e.target.value)}
+              />
+              <button
+                onClick={() => setShowToken((s) => !s)}
+                className="shrink-0 rounded-2xl bg-slate-100 px-4 text-lg transition active:bg-slate-200"
+                aria-label={showToken ? '隱藏存取碼' : '顯示存取碼'}
+              >
+                {showToken ? '🙈' : '👁'}
+              </button>
+            </div>
+            <p className="mt-1 text-xs text-slate-400">
+              ★ 一般使用者的存取碼已內建，此欄只在後端輪替存取碼時才需要動。
+            </p>
+          </div>
+        ) : (
+          <div className="rounded-2xl bg-slate-50 px-3 py-2.5 text-xs font-bold text-slate-500">
+            🔒 存取碼已內建，無需設定（由管理者管理）
+          </div>
+        )}
         <div>
           <label className="field-label">經辦人預設姓名（登記異動用）</label>
           <input
