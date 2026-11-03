@@ -270,23 +270,37 @@ export default function ActionTab({
   }
 
   /** 批次送出（入庫／出庫／盤點） */
+  /**
+   * 批次送出（入庫／出庫／盤點）—— 樂観送出版本：
+   * ① 按下確認後「立刻」關彈窗，等待 GAS 的時間全部移到背景；
+   *    庫存由 App 先本地試算更新（API 回應後再以後端值校正、失敗自動 rollback）
+   * ② 手動輸入客戶要存清單時，改為跟批次 API「同時（平行）」送出，
+   *    不再先序列等 add_customer ＋ list_customers 兩個來回（省 4~10 秒）
+   */
   async function handleConfirm() {
     setBusy(true);
+    // 快照：失敗時整組還原（暫存清單／備註／補帳勾選），使用者不用重打
+    const snapshot = { lines, remark, force };
+    // 出庫＋手動輸入客戶＋勾選保存 → 與批次 API 平行存入客戶清單（不擋批次送出）
+    const shouldSaveCustomer =
+      mode === 'OUT' && custIsManual && finalCustomer && saveNewCust &&
+      !(customers || []).some(
+        (c) => String(c.customer_name).toUpperCase() === finalCustomer.toUpperCase(),
+      );
+    // .catch 包在 Promise 因此就算批次先失敗、此 Promise 被冷落也不會噴 Unhandled Rejection
+    const addCustomerPromise = shouldSaveCustomer
+      ? gasRequest(getGasUrl(), {
+          action: 'add_customer',
+          customer_name: finalCustomer,
+          country: newCustCountry.trim(),
+        })
+          .then(() => ({ ok: true }))
+          .catch((ce) => ({ ok: false, error: ce && ce.message ? ce.message : String(ce) }))
+      : null;
+
+    // 立刻關彈窗 → 畫面馬上有反應（樂観：App 已先行更新本地庫存並顯示回饋）
+    setConfirmOpen(false);
     try {
-      // 出庫＋手動輸入客戶＋勾選保存 → 先存入客戶清單
-      if (mode === 'OUT' && custIsManual && finalCustomer && saveNewCust) {
-        const already = (customers || []).some(
-          (c) => String(c.customer_name).toUpperCase() === finalCustomer.toUpperCase(),
-        );
-        if (!already) {
-          await gasRequest(getGasUrl(), {
-            action: 'add_customer',
-            customer_name: finalCustomer,
-            country: newCustCountry.trim(),
-          });
-          await loadCustomers();
-        }
-      }
       await onBatchSubmit({
         type: mode === 'COUNT' ? '盤點' : mode, // 後端把 IN→入庫、OUT→出庫
         customer: mode === 'OUT' ? finalCustomer : '',
@@ -319,11 +333,37 @@ export default function ActionTab({
       } catch (e) {
         /* ignore */
       }
-      setConfirmOpen(false);
       setLines([]);
       setRemark('');
+      // 客戶收尾：不等結果就解鎖 UI（非同步收尾），成功／失敗再通知
+      if (addCustomerPromise) {
+        addCustomerPromise.then((custRes) => {
+          if (custRes.ok || /已存在/.test(custRes.error || '')) {
+            // 樂観 append 進本地客戶清單 —— 免除重新拉整份 list_customers 的來回
+            setCustomers((prev) => {
+              const list = prev || [];
+              if (list.some((c) => String(c.customer_name).toUpperCase() === finalCustomer.toUpperCase())) {
+                return list;
+              }
+              return [
+                ...list,
+                { customer_id: '', customer_name: finalCustomer, country: newCustCountry.trim() },
+              ].sort((a, b) => String(a.customer_name).localeCompare(String(b.customer_name)));
+            });
+          } else {
+            showToast(
+              `⚠️ 客戶「${finalCustomer}」存入客戶清單失敗（出貨單本身不受影響）：${custRes.error}`,
+              'error',
+            );
+          }
+        });
+      }
     } catch (e) {
-      /* 失敗：保持彈窗，錯誤已由 App Toast 顯示 */
+      /* 失敗：App 已 rollback 樂観庫存；這裡還原暫存清單與彈窗，可直接重送 */
+      setLines(snapshot.lines);
+      setRemark(snapshot.remark);
+      setForce(snapshot.force);
+      setConfirmOpen(true);
     } finally {
       setBusy(false);
     }
