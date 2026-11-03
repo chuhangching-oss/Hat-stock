@@ -9,6 +9,7 @@ import ActionTab from './components/ActionTab';
 import WorkOrderTab from './components/WorkOrderTab';
 import ProductionTab from './components/ProductionTab';
 import ShipmentTab from './components/ShipmentTab';
+import HygieneTab from './components/HygieneTab';
 import AnalyticsTab from './components/AnalyticsTab';
 import LookbookTab from './components/LookbookTab';
 import LookbookPublic from './components/LookbookPublic';
@@ -24,6 +25,7 @@ const TABS = [
   { key: 'pwo', label: '生產工令', icon: '🏭', roles: ['manager', 'ANDY'] },
   { key: 'wo', label: '工單管理', icon: '📋', roles: ['manager', 'ANDY'] },
   { key: 'ship', label: '出庫出貨', icon: '🚢', roles: ['*'] },
+  { key: 'hygiene', label: '品項健檢', icon: '🧹', roles: ['manager', 'ANDY', 'JL'] },
   { key: 'logs', label: '紀錄', icon: '🧾', roles: ['manager'] },
   { key: 'book', label: '款式圖鑑', icon: '🧢', roles: ['manager', 'JL'] },
   { key: 'report', label: '營運報表', icon: '📊', roles: ['manager'] },
@@ -442,6 +444,7 @@ export default function App() {
             goToSettings={() => setTab('settings')}
           />
         )}
+        {tab === 'hygiene' && <HygieneTab showToast={showToast} />}
         {tab === 'logs' && (
           <StockLogTab
             logs={logs.logs}
