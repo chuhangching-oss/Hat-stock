@@ -191,6 +191,11 @@ export default function SearchTab({
                         低庫存
                       </span>
                     )}
+                    {it.active === false && (
+                      <span className="rounded-full bg-slate-500 px-2 py-0.5 text-xs font-bold text-white">
+                        🗄️ 已封存
+                      </span>
+                    )}
                   </div>
                   <h3 className="mt-1.5 text-lg font-extrabold leading-snug text-slate-900">
                     {it.item_name || '（未命名帽型）'}

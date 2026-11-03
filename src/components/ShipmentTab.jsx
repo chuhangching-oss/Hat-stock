@@ -260,11 +260,13 @@ export default function ShipmentTab({
     });
   }
 
-  // 掃碼／手動輸入結果 → 加入明細列
+  // 掃碼／手動輸入結果 → 加入明細列（🧹 已封存品項提示解封，不加入）
   useEffect(() => {
     if (scanResult && scanResult.code) {
       const found = resolveByScan(items, scanResult.code);
-      if (found) addLine(found);
+      if (found && found.active === false) {
+        showToast(`🗄️ ${found.item_code} 已封存：不出現在出貨挑選／掃碼（要啟用請到「🧹 品項健檢」解封）`, 'error');
+      } else if (found) addLine(found);
       else showToast(`❌ 找不到對應料件：${scanResult.code}`, 'error');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1058,7 +1060,7 @@ export default function ShipmentTab({
       {/* ===== 批次挑選彈窗（多選＋逐列填數量 → 整批帶入） ===== */}
       <BatchItemPicker
         open={batchOpen}
-        items={items}
+        items={items.filter((it) => it.active !== false)}
         showToast={showToast}
         onClose={() => setBatchOpen(false)}
         onPick={(list) => {

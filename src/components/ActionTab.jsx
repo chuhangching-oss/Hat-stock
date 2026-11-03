@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { CATEGORY_COLORS, LOW_STOCK_THRESHOLD, SEASONS, STYLE_CATEGORIES } from '../constants';
 import { getOperator, gasRequest, getGasUrl, isManager } from '../api';
 import PhotoButton from './PhotoButton';
@@ -154,11 +154,19 @@ export default function ActionTab({
   const meta = () => MODES.find((m) => m.key === mode);
   const modeLabel = meta().label.replace(/^[^ ]+ /, '');
 
+  // 🧹 已封存品項（Active＝N）不出現在批次挑選／掃碼帶料；資料保留，可到「品項健檢」解封
+  const usableItems = useMemo(
+    () => items.filter((it) => it.active !== false),
+    [items],
+  );
+
   // 掃碼／手動輸入結果 → 帶出料件並聚焦數量
   useEffect(() => {
     if (scanResult && scanResult.code && !newOpen) {
       const found = resolveByScan(items, scanResult.code);
-      if (found) {
+      if (found && found.active === false) {
+        showToast(`🗄️ ${found.item_code} 已封存：不會再出現在出入庫挑選／掃碼（要重新啟用請到「🧹 品項健檢」解封）`, 'error');
+      } else if (found) {
         setSelected(found);
         setQty('');
         setTimeout(() => qtyRef.current && qtyRef.current.focus(), 50);
@@ -939,7 +947,7 @@ export default function ActionTab({
       <BatchItemPicker
         open={batchOpen}
         mode={mode}
-        items={items}
+        items={usableItems}
         force={mode === 'OUT' && force}
         showToast={showToast}
         onClose={() => setBatchOpen(false)}
