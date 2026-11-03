@@ -38,6 +38,28 @@ export function setOperator(name) {
  *  後端 Code.gs 的 ALLOWED_MANAGERS 需與此同步 */
 export const ALLOWED_MANAGERS = ['HC', 'MAIN'];
 
+/** 🎭 角色分權（2026-11）：新手只看基本分頁，減少按鈕數
+ *  - 所有人：庫存查詢／出入庫／出庫出貨／設定
+ *  - HC、MAIN：全部
+ *  - ANDY：＋生產工令、工單管理
+ *  - JL：＋款式圖鑑
+ *  比對方式比照 isManager()：整串、去「數字-」前綴、'-' 前段/後段，任一段命中即成立
+ *  （'02-ANDY'、'ANDY-組長' 都算；'SANDY' 不會誤中）。 */
+export const ROLE_EXTRA_TABS = ['ANDY', 'JL'];
+
+export function matchedRoles(name = getOperator()) {
+  const t = String(name || '').trim().toUpperCase();
+  if (!t) return [];
+  const parts = t.split('-');
+  const candidates = [
+    t,
+    t.replace(/^\d+-/, ''), // 02-ANDY → ANDY
+    parts[0], // ANDY-組長 → ANDY
+    parts[parts.length - 1], // 組長-ANDY → ANDY
+  ];
+  return ROLE_EXTRA_TABS.filter((r) => candidates.includes(r));
+}
+
 /** 此使用者是否為管理者（可查看營運報表）。
  *  相容名冊格式「序號-姓名」（01-HC）與自填格式（HC、HC-老闆、老闆-HC…）：
  *  整串、去「數字-」前綴、'-' 前段/後段，任一段命中白名單即視為管理者。

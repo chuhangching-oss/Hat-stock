@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { CATEGORY_COLORS, LOW_STOCK_THRESHOLD, SEASONS, STYLE_CATEGORIES } from '../constants';
-import { getOperator, gasRequest, getGasUrl } from '../api';
+import { getOperator, gasRequest, getGasUrl, isManager } from '../api';
 import PhotoButton from './PhotoButton';
 import ConfirmDialog from './ConfirmDialog';
 import BatchItemPicker from './BatchItemPicker';
@@ -92,6 +92,8 @@ export default function ActionTab({
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   // 補帳模式（僅出庫）：貨已實際出倉但帳面庫存不足 → 允許負庫存整批送出（後端 force）
+  // 🎭 只有 HC/MAIN 看得到這個開關——負庫存是帳務校正，屬管理權限
+  const manager = isManager();
   const [force, setForce] = useState(false);
   const qtyRef = useRef(null);
 
@@ -246,7 +248,12 @@ export default function ActionTab({
     if (!lines.length) return showToast('❌ 清單尚未加入任何品項', 'error');
     if (!allFilled) return showToast('❌ 尚有品項未填數量（盤點可為 0）', 'error');
     if (overLines.length > 0 && !force)
-      return showToast(`❌ ${overLines.length} 列出庫量大於在庫量——貨其實已出倉的話，可勾下方「🩹 補帳模式」送出`, 'error');
+      return showToast(
+        manager
+          ? `❌ ${overLines.length} 列出庫量大於在庫量——貨其實已出倉的話，可勾下方「🩹 補帳模式」送出`
+          : `❌ ${overLines.length} 列出庫量大於在庫量，請確認數量；貨真的已出倉請聯絡 HC 處理`,
+        'error',
+      );
     if (!operator.trim()) return showToast('❌ 請填寫經辦人姓名（送出前必填）', 'error');
     setConfirmOpen(true);
   }
@@ -859,20 +866,22 @@ export default function ActionTab({
               <div className="mt-1 space-y-1 px-1">
                 <p className="text-xs font-extrabold text-red-600">
                   ⚠️ {overLines.length} 列出庫量大於在庫量——
-                  {force ? '目前為「補帳模式」，會以負庫存送出' : '已阻擋送出'}
+                  {force ? '目前為「補帳模式」，會以負庫存送出' : '已阻擋送出（請確認數量，貨真的已出倉請聯絡 HC 處理）'}
                 </p>
-                <label className="flex cursor-pointer items-start gap-2 rounded-2xl bg-amber-50 px-3 py-2 ring-1 ring-amber-200">
-                  <input
-                    type="checkbox"
-                    checked={force}
-                    onChange={(e) => setForce(e.target.checked)}
-                    className="mt-0.5 h-4 w-4 accent-amber-600"
-                  />
-                  <span className="text-[11px] font-bold leading-snug text-amber-800">
-                    🩹 補帳模式：貨其實已出倉，只是帳面庫存不足？
-                    <br />勾起來就允許這批以負庫存送出，備註會自動標「⚠️負庫存待盤」（之後盤點校正）
-                  </span>
-                </label>
+                {manager && (
+                  <label className="flex cursor-pointer items-start gap-2 rounded-2xl bg-amber-50 px-3 py-2 ring-1 ring-amber-200">
+                    <input
+                      type="checkbox"
+                      checked={force}
+                      onChange={(e) => setForce(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 accent-amber-600"
+                    />
+                    <span className="text-[11px] font-bold leading-snug text-amber-800">
+                      🩹 補帳模式（HC）：貨其實已出倉，只是帳面庫存不足？
+                      <br />勾起來就允許這批以負庫存送出，備註會自動標「⚠️負庫存待盤」（之後盤點校正）
+                    </span>
+                  </label>
+                )}
               </div>
             )}
             {/* 不用 disabled：按下時永遠給理由提示（避免「點了沒反應」像當機） */}

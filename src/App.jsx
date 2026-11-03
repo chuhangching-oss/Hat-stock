@@ -3,7 +3,7 @@ import useInventory from './hooks/useInventory';
 import useWorkOrders from './hooks/useWorkOrders';
 import useProduction from './hooks/useProduction';
 import useStockLogs from './hooks/useStockLogs';
-import { gasRequest, getGasUrl, isManager } from './api';
+import { gasRequest, getGasUrl, isManager, matchedRoles } from './api';
 import SearchTab from './components/SearchTab';
 import ActionTab from './components/ActionTab';
 import WorkOrderTab from './components/WorkOrderTab';
@@ -16,17 +16,18 @@ import StockLogTab from './components/StockLogTab';
 import SettingsTab from './components/SettingsTab';
 import Scanner from './components/Scanner';
 import Toast from './components/Toast';
-// 📊 營運報表 = 核心商業機密：僅管理者（HC / MAIN）顯示導覽按鈕與內容
+// 🎭 角色分權：roles = ['*'] 所有人 ／ 'manager' HC・MAIN ／ 具名角色（ANDY、JL）
+//    新手畫面只出現 庫存查詢／出入庫／出庫出貨／設定，降低第一次上手的按鈕數
 const TABS = [
-  { key: 'search', label: '庫存查詢', icon: '🔍', managerOnly: false },
-  { key: 'action', label: '出入庫', icon: '📦', managerOnly: false },
-  { key: 'pwo', label: '生產工令', icon: '🏭', managerOnly: false },
-  { key: 'wo', label: '工單管理', icon: '📋', managerOnly: false },
-  { key: 'ship', label: '出庫出貨', icon: '🚢', managerOnly: false },
-  { key: 'logs', label: '紀錄', icon: '🧾', managerOnly: false },
-  { key: 'book', label: '款式圖鑑', icon: '🧢', managerOnly: false },
-  { key: 'report', label: '營運報表', icon: '📊', managerOnly: true },
-  { key: 'settings', label: '設定', icon: '⚙️', managerOnly: false },
+  { key: 'search', label: '庫存查詢', icon: '🔍', roles: ['*'] },
+  { key: 'action', label: '出入庫', icon: '📦', roles: ['*'] },
+  { key: 'pwo', label: '生產工令', icon: '🏭', roles: ['manager', 'ANDY'] },
+  { key: 'wo', label: '工單管理', icon: '📋', roles: ['manager', 'ANDY'] },
+  { key: 'ship', label: '出庫出貨', icon: '🚢', roles: ['*'] },
+  { key: 'logs', label: '紀錄', icon: '🧾', roles: ['manager'] },
+  { key: 'book', label: '款式圖鑑', icon: '🧢', roles: ['manager', 'JL'] },
+  { key: 'report', label: '營運報表', icon: '📊', roles: ['manager'] },
+  { key: 'settings', label: '設定', icon: '⚙️', roles: ['*'] },
 ];
 
 /** 🌍 訪客展示路由：網址 #/lookbook → 純展示圖鑑（無登入、無內部按鈕） */
@@ -50,6 +51,25 @@ export default function App() {
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
+
+  // 🎭 角色分權：依經辦身分決定顯示哪些分頁
+  //    HC/MAIN 全部；ANDY ＋生產工令/工單管理；JL ＋款式圖鑑；其餘使用者基本 4 頁
+  const manager = isManager();
+  const extras = matchedRoles(); // 命中的具名角色（例：['ANDY']）
+  const visibleTabs = TABS.filter(
+    (t) =>
+      t.roles.includes('*') ||
+      (manager && t.roles.includes('manager')) ||
+      t.roles.some((r) => extras.includes(r)),
+  );
+  const allowedKeys = visibleTabs.map((t) => t.key).join(',');
+
+  // 經辦身分變動後，當前分頁可能被收走（例：非管理者停在「紀錄」）→ 跳回庫存查詢
+  useEffect(() => {
+    if (guestRoute) return;
+    if (!allowedKeys.split(',').includes(tab)) setTab('search');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allowedKeys, tab, guestRoute]);
 
   // 掃碼狀態：scanFor 決定把掃到的品號帶到哪個分頁
   const [scanFor, setScanFor] = useState(null); // 'search' | 'action'
@@ -420,8 +440,8 @@ export default function App() {
       {/* ===== 底部分頁導覽（大按鈕、好戴手套點擊） ===== */}
       <nav className="fixed inset-x-0 bottom-0 z-20 border-t border-slate-200 bg-white/95 backdrop-blur">
         <div className="mx-auto flex max-w-lg justify-around pb-[env(safe-area-inset-bottom)]">
-          {/* 一般使用者隱藏「營運報表」（managerOnly）；AnalyticsTab 內另有第二道權限防護 */}
-          {TABS.filter((t) => !t.managerOnly || isManager()).map((t) => (
+          {/* 🎭 角色分權：只渲染此經辦可用的分頁；AnalyticsTab／StockLogTab 內另有第二道權限防護 */}
+          {visibleTabs.map((t) => (
             <button
               key={t.key}
               onClick={() => setTab(t.key)}
