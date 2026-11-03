@@ -7,28 +7,32 @@ import {
   getToken,
   setToken,
   testConnection,
-  isManager,
 } from '../api';
 
 /**
  * 分頁 3：設定
  * - Apps Script Web App 網址（存在手機 localStorage）
- * - 存取碼：🔒 已內建，僅 HC/MAIN 可查看／覆寫（一般使用者不顯示此欄）
+ * - 🔒 存取碼：第一次進 App 必填（米字號遮蔽）；存好即隱藏；
+ *   後端改存取碼時請求會失敗並自動清除 → 此頁重新出現輸入欄
  * - 經辦人預設姓名
  * - 連線測試
  */
 export default function SettingsTab({ showToast, onSaved }) {
-  const manager = isManager();
   const [url, setUrl] = useState(getGasUrl());
   const [name, setName] = useState(getOperator());
   const [token, setTok] = useState(getToken());
-  const [showToken, setShowToken] = useState(false); // 存取碼遮蔽切換（僅 HC/MAIN）
+  const [editingToken, setEditingToken] = useState(!getToken()); // 沒存過＝要輸入
+  const [showToken, setShowToken] = useState(false); // 米字號遮蔽切換
   const [testing, setTesting] = useState(false);
 
   async function handleSave() {
+    if (editingToken && !token.trim()) {
+      return showToast('❌ 請先輸入存取碼（向管理者索取）', 'error');
+    }
     setGasUrl(url);
     setOperator(name);
-    if (manager) setToken(token); // 一般人固定用內建存取碼，不寫入 localStorage
+    setToken(token);
+    setEditingToken(false); // 存好即隱藏
     showToast('已儲存設定');
     setTesting(true);
     try {
@@ -37,6 +41,8 @@ export default function SettingsTab({ showToast, onSaved }) {
       onSaved && onSaved();
     } catch (e) {
       showToast(`❌ 連線失敗：${e.message}`, 'error');
+      // 連線失敗若是存取碼問題（已被 gasRequest 清除），重新展開輸入欄
+      if (!getToken()) setEditingToken(true);
     } finally {
       setTesting(false);
     }
@@ -57,14 +63,14 @@ export default function SettingsTab({ showToast, onSaved }) {
             ★ 網址必須以 <b>/exec</b> 結尾（不是 /dev）。下方部署教學有完整步驟。
           </p>
         </div>
-        {manager ? (
+        {editingToken ? (
           <div>
-            <label className="field-label">存取碼（對應後端 API_TOKEN；僅 HC/MAIN 可見）</label>
+            <label className="field-label">🔒 存取碼（必填，向管理者索取）</label>
             <div className="flex gap-2">
               <input
                 className="field-input flex-1"
                 type={showToken ? 'text' : 'password'}
-                placeholder="與後端 Code.gs 的 API_TOKEN 一致"
+                placeholder="輸入後不會再顯示"
                 value={token}
                 onChange={(e) => setTok(e.target.value)}
               />
@@ -77,12 +83,23 @@ export default function SettingsTab({ showToast, onSaved }) {
               </button>
             </div>
             <p className="mt-1 text-xs text-slate-400">
-              ★ 一般使用者的存取碼已內建，此欄只在後端輪替存取碼時才需要動。
+              ★ 與後端 Code.gs 的 API_TOKEN 一致才能連線；輸入一次後就不會再顯示。
             </p>
           </div>
         ) : (
-          <div className="rounded-2xl bg-slate-50 px-3 py-2.5 text-xs font-bold text-slate-500">
-            🔒 存取碼已內建，無需設定（由管理者管理）
+          <div className="flex items-center justify-between rounded-2xl bg-slate-50 px-3 py-2.5">
+            <span className="text-xs font-bold text-slate-500">🔒 存取碼已設定（●●●●，不再顯示）</span>
+            <button
+              onClick={() => {
+                setToken('');
+                setTok('');
+                setEditingToken(true);
+                setShowToken(false);
+              }}
+              className="shrink-0 rounded-xl bg-slate-200 px-3 py-1.5 text-xs font-extrabold text-slate-600 transition active:bg-slate-300"
+            >
+              重新輸入
+            </button>
           </div>
         )}
         <div>

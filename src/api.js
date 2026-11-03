@@ -18,14 +18,11 @@ export function setGasUrl(url) {
 }
 
 /** 存取碼（與 Code.gs 的 API_TOKEN 相同時才可通）
- *  🔒 2026-11 起「內建」存取碼：一般人不需要填、也看不到（設定頁已隱藏）；
- *  僅 HC/MAIN 可在設定頁自訂覆寫（對應後端 API_TOKEN 輪替）。 */
-const DEFAULT_TOKEN = 'GU3132';
-
+ *  🔒 第一次進 App 時輸入一次，之後設定頁不再顯示（米字號遮蔽）。
+ *  後端改存取碼（換 API_TOKEN）時，所有請求會回「存取碼錯誤」
+ *  → gasRequest 自動清除已存值 → 設定頁重新出現輸入欄，重填一次即可。 */
 export function getToken() {
-  // 一般使用者一律用內建碼（就算 localStorage 殘留舊值也自動導正）
-  if (!isManager()) return DEFAULT_TOKEN;
-  return localStorage.getItem(TOKEN_KEY) || DEFAULT_TOKEN;
+  return localStorage.getItem(TOKEN_KEY) || '';
 }
 
 export function setToken(token) {
@@ -109,7 +106,13 @@ export async function gasRequest(gasUrl, payload, timeoutMs = 30000) {
     if (!res.ok) throw new Error(`HTTP 錯誤 ${res.status}，請確認 Web App 是否部署正確`);
     const json = await res.json();
     if (!json || json.ok !== true) {
-      throw new Error((json && json.error) || 'API 回應格式錯誤');
+      const msg = (json && json.error) || 'API 回應格式錯誤';
+      // 🔐 後端換過存取碼（或尚未輸入）→ 清除已存值，設定頁會重新出現輸入欄
+      if (msg.includes('存取碼錯誤')) {
+        setToken('');
+        throw new Error('存取碼錯誤：請到「設定」分頁重新輸入存取碼');
+      }
+      throw new Error(msg);
     }
     return json.data;
   } catch (e) {
