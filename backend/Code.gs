@@ -75,6 +75,17 @@
  *              item_name, color_spec, unit, change_qty, operator, remark }
  *       （品名/顏色/單位由主檔帶入；篩選由前端做）
  *
+ *   { action: "list_dormant", operator, months? }   → 🧹 品項健檢：逾 N 月無異動清單
+ *       months 預設 6（可調）；判斷以 STOCK_LOG 最後異動日為準（無紀錄退主檔 Last_Updated）
+ *       回傳 { cutoff, months, total, items:[{ item_code, item_name, color_spec,
+ *              category, stock_qty, unit, location, last_activity, days_idle, active }] }
+ *       🔐 僅限 HC / MAIN / ANDY / JL（引導到「品項健檢」分頁逐項勾選處理）
+ *
+ *   { action: "set_items_active", operator, item_codes:[…], active:'N'|'Y' }
+ *                                                   → 🧹 批次封存(N)／解封(Y) 品項
+ *       只改主檔第 13 欄 Active，不刪除任何資料（歷史紀錄／出貨單參照完整保留）；
+ *       封存後品項不出現在批次挑選／掃碼，可隨時解封；🔐 僅限 HC / MAIN / ANDY / JL
+ *
  *   { action: "update_item_info", item_code,
  *     image_url?, style_category?, season?,      → 更新品項圖鑑資訊（缺的欄不動）
  *     is_public? }                                 回傳 { item }
@@ -109,6 +120,7 @@ var MASTER_HEADERS = [
   'Style_Category', // 第 10 欄（選填）：帽型分類（Fedora 紳士帽 / Casquette 報童帽 / Beret 貝雷帽 / Cap / Boonie…）
   'Season',         // 第 11 欄（選填）：SS（春夏）/ AW（秋冬）/ 四季款
   'Is_Public',      // 第 12 欄（選填）：圖鑑對外公開 Y / N（留空＝Y）
+  'Active',         // 第 13 欄（選填）：品項封存旗標 Y / N（留空＝Y；N＝封存，不出現在挑選／掃碼）
 ];
 var LOG_HEADERS = [
   'Log_ID', 'Timestamp', 'Type', 'Item_Code',
@@ -152,6 +164,9 @@ var SHP_STATUS = '已出庫';
 /** 🔐 營運報表白名單：僅限這些使用者代碼可查看統計報表（商業機密）
  *  前端 src/api.js 的 ALLOWED_MANAGERS 需與此同步 */
 var ALLOWED_MANAGERS = ['HC', 'MAIN'];
+
+/** 🧹 品項健檢／封存白名單：HC / MAIN / ANDY / JL（封存影響現場挑選範圍，需授權者操作） */
+var HYGIENE_MANAGERS = ['HC', 'MAIN', 'ANDY', 'JL'];
 
 var VALID_TYPES = ['入庫', '出庫', '盤點'];
 
@@ -324,6 +339,13 @@ function doPost(e) {
       case 'list_stock_logs':
         data = listStockLogs_(req);
         break;
+      /* ---- 🧹 品項健檢：逾期未異動清單／封存・解封 ---- */
+      case 'list_dormant':
+        data = listDormant_(req);
+        break;
+      case 'set_items_active':
+        data = setItemsActive_(req);
+        break;
       default:
         throw new Error(
           '未知的 action：' + req.action +
@@ -338,6 +360,7 @@ function doPost(e) {
             'update_item_info', 'public_lookbook', 'list_yarn', 'save_yarn',
             'list_production_orders', 'create_production_order', 'start_production_order',
             'complete_production_order', 'ship_production_order', 'list_stock_logs',
+            'list_dormant', 'set_items_active',
           ].join(' / ') +
           '。請在 Apps Script 編輯器：部署 → 管理部署作業 → 編輯(筆) → 版本選「新版本」→ 部署',
         );
@@ -1398,11 +1421,16 @@ function nextShipmentId_() {
   return prefix + ('00' + (max + 1)).slice(-2);
 }
 
-/** 🔐 使用者身分是否符合報表白名單（HC / MAIN）
+/** 🔐 使用者身分是否符合任一指定白名單（共用的比對邏輯）
  *  相容名冊格式「序號-姓名」（01-王小明）與自填格式（HC、HC-老闆、老闆-HC…）：
  *  整串、去「數字-」前綴、'-' 前段/後段，任一段命中白名單即視為管理者。
  *  與前端 src/api.js 的 isManager() 邏輯同步，兩邊都要改。 */
 function isManagerOp_(op) {
+  return matchAnyRole_(op, ALLOWED_MANAGERS);
+}
+
+/** 身分比對共用：op 任一候選寫法命中 whitelist 即成立 */
+function matchAnyRole_(op, whitelist) {
   var t = String(op || '').trim().toUpperCase();
   if (!t) return false;
   var parts = t.split('-');
@@ -1413,9 +1441,17 @@ function isManagerOp_(op) {
     parts[parts.length - 1],  // 王小明-HC → HC
   ];
   for (var i = 0; i < candidates.length; i++) {
-    if (ALLOWED_MANAGERS.indexOf(String(candidates[i]).trim()) !== -1) return true;
+    if (whitelist.indexOf(String(candidates[i]).trim()) !== -1) return true;
   }
   return false;
+}
+
+/** 品項健檢／封存權限檢核：限 HC / MAIN / ANDY / JL */
+function checkHygienePerm_(operator) {
+  if (!matchAnyRole_(operator, HYGIENE_MANAGERS)) {
+    throw new Error('權限不足：品項健檢／封存僅限 HC / MAIN / ANDY / JL 操作。' +
+      '目前身分：' + (String(operator || '').trim() || '未填經辦人'));
+  }
 }
 
 /** 報表權限檢核：非白名單一律拋出拒絕（不下修、無例外） */
@@ -1469,6 +1505,111 @@ function listStockLogs_(req) {
   }
   rows.sort(function (a, b) { return String(b.timestamp).localeCompare(String(a.timestamp)); });
   return rows;
+}
+
+/* ============================================================
+ * 🧹 品項健檢（Hygiene）：找出長期無異動的品項 ＋ 封存／解封
+ * ------------------------------------------------------------
+ * 判斷條件（可調 months，預設 6 個月）：
+ *   該品號在 STOCK_LOG 的最後一筆異動（無紀錄則以主檔 Last_Updated 代替）
+ *   早於「months 個月前」→ 列為待檢視（跟目前庫存量無關）
+ * 處理方式＝封存不刪除：Active 欄設 N 後不出現在批次挑選／掃碼，
+ *   但主檔資料、歷史紀錄、出貨單參照完整保留，隨時可設回 Y 解封。
+ * ============================================================ */
+
+/**
+ * 列出所有「逾 months 個月沒有異動」的品項
+ * req = { operator, months? } → { cutoff, months, total, items:[…] }
+ * 每筆：item_code / item_name / color_spec / category / stock_qty / unit /
+ *       location / last_activity（最後異動日 YYYY-MM-DD，無紀錄為 ''）/
+ *       days_idle（閒置天數，無紀錄為 null）/ active（true=正常、false=已封存）
+ */
+function listDormant_(req) {
+  checkHygienePerm_(req.operator);
+  var months = Number(req.months) || 6;
+  if (!(months > 0) || months > 60) months = 6;
+  var cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - months);
+  var cutoffYMD = Utilities.formatDate(cutoff, nowTz_(), 'yyyy-MM-dd'); // 早於此日＝閒置
+
+  // ① 掃整份 STOCK_LOG：品號 → 最後異動日期（只讀不寫）
+  var lastAct = {};
+  var logSheet = getSheet_(SHEET_LOG);
+  var last = logSheet.getLastRow();
+  if (last >= 2) {
+    var rows = logSheet.getRange(2, 1, last - 1, LOG_HEADERS.length).getValues();
+    for (var i = 0; i < rows.length; i++) {
+      var code = String(rows[i][3]).trim().toUpperCase();
+      var ymd = dueYMD_(rows[i][1]);
+      if (!code || !ymd) continue;
+      if (!lastAct[code] || ymd > lastAct[code]) lastAct[code] = ymd;
+    }
+  }
+
+  // ② 逐品項組裝：有異動紀錄用最後異動日，無紀錄退用主檔 Last_Updated
+  var today = Utilities.formatDate(new Date(), nowTz_(), 'yyyy-MM-dd');
+  var out = [];
+  listMaster_().forEach(function (it) {
+    var key = String(it.item_code).trim().toUpperCase();
+    if (!key) return;
+    var act = lastAct[key] || dueYMD_(it.last_updated) || '';
+    if (act && act > cutoffYMD) return; // 6 個月內動過 → 不列
+    var days = act ? Math.floor((new Date(today + 'T00:00:00Z') - new Date(act + 'T00:00:00Z')) / 86400000) : null;
+    out.push({
+      item_code: it.item_code,
+      item_name: it.item_name,
+      color_spec: it.color_spec,
+      category: it.category,
+      stock_qty: it.stock_qty,
+      unit: it.unit,
+      location: it.location,
+      last_activity: act,
+      days_idle: days,
+      active: it.active !== false,
+    });
+  });
+  // 最久沒動的最前面；同日以品號排序
+  out.sort(function (a, b) {
+    if (a.last_activity !== b.last_activity) return String(a.last_activity).localeCompare(String(b.last_activity));
+    return String(a.item_code).localeCompare(String(b.item_code));
+  });
+  return { cutoff: cutoffYMD, months: months, total: out.length, items: out };
+}
+
+/**
+ * 批次封存／解封品項（只動 Active 欄，不刪除任何資料）
+ * req = { operator, item_codes:[…], active:'N'(封存)|'Y'(解封) }
+ * → { updated, active, not_found }
+ */
+function setItemsActive_(req) {
+  checkHygienePerm_(req.operator);
+  var codes = (Array.isArray(req.item_codes) ? req.item_codes : [])
+    .map(function (c) { return String(c).trim().toUpperCase(); })
+    .filter(function (c) { return c; });
+  if (codes.length === 0) throw new Error('缺少 item_codes');
+  var active = String(req.active || 'N').trim().toUpperCase() === 'Y' ? 'Y' : 'N';
+
+  ensureSheet_(SHEET_MASTER); // 舊表自動補上 Active 標頭（第 13 欄）
+  var sheet = getSheet_(SHEET_MASTER);
+  var last = sheet.getLastRow();
+  if (last < 2) return { updated: 0, active: active, not_found: codes };
+  var codesCol = sheet.getRange(2, 1, last - 1, 1).getValues();
+  var status = {}; // 'Y'=找到了
+  codes.forEach(function (c) { if (!status[c]) status[c] = false; });
+  var count = 0;
+  for (var r = 0; r < codesCol.length; r++) {
+    var c = String(codesCol[r][0]).trim().toUpperCase();
+    if (c && status[c] === false) { // 找到且尚未改過
+      sheet.getRange(r + 2, 13).setValue(active); // 第 13 欄 = Active
+      status[c] = true;
+      count++;
+    }
+  }
+  return {
+    updated: count,
+    active: active,
+    not_found: codes.filter(function (c) { return status[c] === false; }),
+  };
 }
 
 /** 出貨單主表（由新到舊排序；匯出 Commercial Invoice / Packing List 用） */
@@ -2253,6 +2394,7 @@ function rowToItem_(row) {
     style_category: row.length > 9 ? String(row[9]) : '', // 帽型分類（Fedora/Casquette/Beret/Cap/Boonie…）
     season: row.length > 10 ? String(row[10]) : '',       // SS / AW / 四季
     is_public: row.length > 11 ? (String(row[11]).trim().toUpperCase() || 'Y') : 'Y', // 空白視為 Y
+    active: row.length > 12 ? (String(row[12]).trim().toUpperCase() !== 'N') : true, // 空白視為未封存（true）；'N'＝已封存
   };
 }
 
