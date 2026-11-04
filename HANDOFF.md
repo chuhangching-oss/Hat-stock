@@ -46,10 +46,17 @@
 - `9e65fa8` 角色分權（見上節）
 - `2d5f479` 存取碼首次必填、輸入後隱藏、換碼自動失效重輸
 - 後端最後一次變更 = `d14d57e`（之後都是前端）
+- ⭐ `505b6ca` 之前有 6 筆（11-04 凌晨）是**使用者在 GitHub 網頁上傳**的修改，已 rebase 保留：
+  - 新分頁 `HygieneTab.jsx`（🧹 衛生檢查，roles：manager/ANDY/JL）
+  - 後端新增呆料管理：action `list_dormant` / `set_items_active`、`checkHygienePerm_`（白名單 HC/MAIN/ANDY/JL）
+  - App.jsx 批次送出「樂觀更新」：送出當下先以本機庫存試算並立即反映，後端回應再校正（新品項除外，等自動編號）
+  - ActionTab/SearchTab/ShipmentTab 小改
+  - ⚠️ 這批含後端修改 → 使用者需重貼 Code.gs 並部署新版本才會生效
 
 ## 待辦／待使用者實測
 
 - [ ] 使用者實測回報：批次入庫新品項、D1177W/S22D 補帳、JL 備註出庫 ✏️ 刪改
+- [ ] 衛生檢查分頁（使用者自傳的 HygieneTab + list_dormant/set_items_active）：需重貼 Code.gs 部署新版本後實測
 - [ ] README.md API 文件補 `correct_stock_log`（get/update/delete_shipment 已補）
 - [ ] 若使用者要求：HC 出貨單管理加「新增明細列」功能（補錄漏掉的款式併進同張 SH 單）
 - [ ] 客戶份額解析規則如有誤抓，修 `StockLogTab.jsx` 的 `rowQtyForCustomer`/`extractRemarkCustomers`
@@ -58,6 +65,7 @@
 
 - 使用者語言：繁體中文；「無誤」= 實測成功；改完要回報 commit sha + Vercel 狀態 + 是否需重貼 Code.gs
 - 使用者非專業工程師：說明要口語、步驟化；帳務安全相關決策先解釋利弊
+- ⚠️ 使用者偶爾會**直接在 GitHub 網頁上傳檔案**——本機動工前先 `git pull --rebase origin main`，絕不 force push，避免蓋掉他的修改
 
 ## 重灌後恢復開發環境
 
