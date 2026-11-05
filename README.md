@@ -281,9 +281,15 @@ POST { action:"update_shipment", shipment_id, operator,
        incoterm?, currency?,
        lines?:[{ row, qty }, …], force? }                  → 🔧 HC 限定編輯出貨單
        lines 數量修正會自動調整庫存（增→扣、減→回補；不足需 force），
-       並� STOCK_LOG「修正出貨單 SH…」；單頭統計（款式/箱數/金額/重量）自動重算
+       並寫 STOCK_LOG「修正出貨單 SH…」；單頭統計（款式/箱數/金額/重量）自動重算
 POST { action:"delete_shipment", shipment_id, operator }   → 🔧 HC 限定刪除整張出貨單
        主表＋明細整張移除；各品號數量【回補庫存】並寫 STOCK_LOG type=回補
+POST { action:"correct_stock_log", log_id, operator,
+       new_qty?, new_remark?, delete? }                    → 🔧 HC 限定刪改出入庫紀錄
+       new_qty＝新的異動數量（入庫正／出庫負）→ 庫存補差額並在備註標「更正 舊→新」；
+       new_remark＝只改備註（不動庫存）；delete:true＝刪除整列（庫存反轉原量）；
+       盤點列僅能刪除或改備註（要改數量請先刪除再重新盤點）；
+       任何操作都另寫一筆 type=更正 稽核列（change=0，不動庫存）
 POST { action:"getSalesReport", operator, period?:"ALL"|"YEAR"|"MONTH" } → 營運統計報表
        🔐 僅限管理者 HC / MAIN（不分大小寫、容許 01-HC 等名冊格式）：
        其他身分直接拋「權限不足…」（ok:false，等同 403），
