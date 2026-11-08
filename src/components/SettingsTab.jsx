@@ -128,6 +128,18 @@ export default function SettingsTab({ showToast, onSaved }) {
       </details>
 
       <details className="rounded-3xl bg-white p-5 shadow-card">
+        <summary className="cursor-pointer text-lg font-extrabold">📅 出貨排程 → Google 日曆同步設定</summary>
+        <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm font-semibold leading-6 text-slate-600">
+          <li>Google 日曆網頁版 ➔ 左側「+ 其他日曆 ➔ 建立新日曆」，命名如「出貨排程」。</li>
+          <li>該日曆「設定 ➔ 與特定人員共用」➔ 加入另外 3 位同事的 Google 帳號（權限＝可以編輯）。</li>
+          <li>同頁「整合行事曆」區塊 ➔ 複製 <b>日曆 ID</b>（形如 abc123@group.calendar.google.com）。</li>
+          <li>到 Apps Script 編輯器，把 Code.gs 開頭的 <code>SCHEDULE_CALENDAR_ID = '</code>…<code>'</code> 填入該 ID ➔ 儲存。</li>
+          <li>編輯器中手動執行一次 <code>setupSheets</code> 或 <code>resyncSchedule</code> ➔ 完成行事曆授權。</li>
+          <li>「部署 ➔ 管理部署作業 ➔ 編輯 ➔ 新版本」。之後排程存檔即自動同步，每日 06:00 也會自動補推。</li>
+        </ol>
+      </details>
+
+      <details className="rounded-3xl bg-white p-5 shadow-card">
         <summary className="cursor-pointer text-lg font-extrabold">❓ 常見問題</summary>
         <div className="mt-3 space-y-3 text-sm font-semibold leading-6 text-slate-600">
           <p><b>相機開不了？</b>需 HTTPS 網站（Vercel/Cloudflare Pages 預設 https）。iOS 需在 Safari 允許相機權限。</p>

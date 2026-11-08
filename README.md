@@ -41,6 +41,7 @@ knit-factory-inventory/
         ├── SearchTab.jsx         # 分頁1：搜尋 + 掃碼 + 卡片清單（<=10 紅字警示）
         ├── ActionTab.jsx         # 分頁2：入庫/出庫/盤點 + 防呆 + 二次確認
         ├── AnalyticsTab.jsx      # 分頁5：營運報表（🔐 僅限 HC / MAIN）
+        ├── ScheduleTab.jsx       # 🚢 出貨排程/倒數（五節點看板＋Google 日曆同步）
         ├── LookbookTab.jsx       # 分頁6：款式圖鑑（卡片/Lightbox/編輯/分享連結）
         ├── LookbookPublic.jsx    # 訪客展示頁（#/lookbook 純展示，免登入）
         ├── LookbookShared.jsx    # 圖鑑共用：grouping/篩選/HatImage 破圖 Placeholder
@@ -301,6 +302,23 @@ POST { action:"update_item_info", item_code, image_url?,
 GET  { action:"public_lookbook" }                          → 🌍 數位圖鑑（免存取碼）
        僅回 Is_Public≠'N' 款式；已過濾庫存/內部欄位，只回
        style_no/品名/帽型分類/季節/colors[]/Image_URL（以款式 grouping）
+
+🚢 訂單出貨排程（SHIPMENT_SCHEDULE ＋ Google Calendar 單向同步）
+POST { action:"list_schedule" }                            → 全部排程（依出貨日由近到遠）
+POST { action:"create_schedule", order_no?, customer_name?,
+       material_due?, acc_flag?("客供"|"自備"), acc_due?,
+       label_flag?, label_due?, factory_complete?,         → 新增排程（SSyyMMdd-##）
+       ship_date(必填), details?, operator, remark? }        Order_No 留空自動 POyyyyMMdd-##
+POST { action:"update_schedule", schedule_id, …任一欄位,
+       operator }                                          → 修改（缺的欄不動，自動重同步日曆）
+POST { action:"mark_schedule_shipped", schedule_id,
+       operator, remark? }                                 → 待出貨 → 已出貨（日曆事件標 ✅）
+POST { action:"cancel_schedule", schedule_id, operator }   → 已取消（同步刪除日曆事件）
+POST { action:"resync_schedule", operator }                → 全表對帳：補推漏失/被刪的事件
+       行事曆行為：只有 Ship_Date 產生整日事件；修改＝同 Event ID 覆蓋不重複；
+       補推以每日 06:00 checkDueWorkOrders 觸發器自動執行。
+       啟用方式：Code.gs 開頭 SCHEDULE_CALENDAR_ID 填入共用日曆 ID
+       （留空 = 不同步，Calendar_Status=「未設定」，App 功能照常）
 回應固定為 { ok:true, data:… } 或 { ok:false, error:"…" }
 ```
 

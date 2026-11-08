@@ -3,11 +3,13 @@ import useInventory from './hooks/useInventory';
 import useWorkOrders from './hooks/useWorkOrders';
 import useProduction from './hooks/useProduction';
 import useStockLogs from './hooks/useStockLogs';
+import useSchedule from './hooks/useSchedule';
 import { gasRequest, getGasUrl, isManager, matchedRoles } from './api';
 import SearchTab from './components/SearchTab';
 import ActionTab from './components/ActionTab';
 import WorkOrderTab from './components/WorkOrderTab';
 import ProductionTab from './components/ProductionTab';
+import ScheduleTab from './components/ScheduleTab';
 import ShipmentTab from './components/ShipmentTab';
 import HygieneTab from './components/HygieneTab';
 import AnalyticsTab from './components/AnalyticsTab';
@@ -25,6 +27,7 @@ const TABS = [
   { key: 'pwo', label: '生產工令', icon: '🏭', roles: ['manager', 'ANDY'] },
   { key: 'wo', label: '工單管理', icon: '📋', roles: ['manager', 'ANDY'] },
   { key: 'ship', label: '出庫出貨', icon: '🚢', roles: ['*'] },
+  { key: 'sched', label: '出貨排程', icon: '📅', roles: ['*'] },
   { key: 'hygiene', label: '品項健檢', icon: '🧹', roles: ['manager', 'ANDY', 'JL'] },
   { key: 'logs', label: '紀錄', icon: '🧾', roles: ['manager'] },
   { key: 'book', label: '款式圖鑑', icon: '🧢', roles: ['manager', 'JL'] },
@@ -42,6 +45,7 @@ export default function App() {
   const workOrders = useWorkOrders();
   const production = useProduction();
   const logs = useStockLogs();
+  const schedule = useSchedule();
   const [tab, setTab] = useState('search');
   const [query, setQuery] = useState(''); // 查詢頁搜尋字
   const [toast, setToast] = useState(null); // { type: 'success'|'error', msg }
@@ -106,13 +110,14 @@ export default function App() {
     [inventory],
   );
 
-  // 頂部「同步」按鈕：庫存主檔＋工作令＋生產工令＋異動記錄一起重拉
+  // 頂部「同步」按鈕：庫存主檔＋工作令＋生產工令＋異動記錄＋出貨排程一起重拉
   const handleSync = useCallback(() => {
     inventory.refresh();
     workOrders.refresh();
     production.refresh();
     logs.refresh();
-  }, [inventory, workOrders, production, logs]);
+    schedule.refresh();
+  }, [inventory, workOrders, production, logs, schedule]);
 
   // 出入庫單筆送出（ActionTab「直接入庫新品項」呼叫）
   const handleSubmitLog = useCallback(
@@ -343,6 +348,88 @@ export default function App() {
     [production, showToast],
   );
 
+  // ===== 🚢 出貨排程（ScheduleTab 呼叫：計畫層看板，不扣庫存） =====
+  // 行事曆同步結果 → toast 尾綴；「未設定」代表後端 SCHEDULE_CALENDAR_ID 尚未填
+  const scheduleCalSuffix = useCallback((status) => {
+    const s = String(status || '').trim();
+    if (s === '已同步') return '，已同步共用 Google 日曆';
+    if (s === '未設定') return '（日曆未設定：後端 SCHEDULE_CALENDAR_ID 留空）';
+    if (s === '已刪除') return '，日曆事件已刪除';
+    if (s.startsWith('失敗')) return ` ⚠️ 日曆同步失敗（${s.slice(3)}）`;
+    return '';
+  }, []);
+
+  const handleCreateSchedule = useCallback(
+    async (payload) => {
+      try {
+        const res = await schedule.createSchedule(payload);
+        const s = res.schedule;
+        showToast(`✅ 排程已建立：${s.schedule_id}（${s.order_no}，出貨日 ${s.ship_date}）${scheduleCalSuffix(res.calendar_status)}`);
+        return res;
+      } catch (e) {
+        showToast(`❌ 新增排程失敗：${e.message}`, 'error');
+        throw e;
+      }
+    },
+    [schedule, showToast, scheduleCalSuffix],
+  );
+
+  const handleUpdateSchedule = useCallback(
+    async (scheduleId, payload) => {
+      try {
+        const res = await schedule.updateSchedule({ schedule_id: scheduleId, ...payload });
+        const s = res.schedule;
+        showToast(`✅ 排程已更新：${s.order_no || s.schedule_id}（出貨日 ${s.ship_date}）${scheduleCalSuffix(res.calendar_status)}`);
+        return res;
+      } catch (e) {
+        showToast(`❌ 更新排程失敗：${e.message}`, 'error');
+        throw e;
+      }
+    },
+    [schedule, showToast, scheduleCalSuffix],
+  );
+
+  const handleMarkScheduleShipped = useCallback(
+    async (s) => {
+      try {
+        const res = await schedule.markShipped(s.schedule_id);
+        showToast(`📦 已標記出貨：${res.schedule.order_no || res.schedule.schedule_id}${scheduleCalSuffix(res.calendar_status)}`);
+        return res;
+      } catch (e) {
+        showToast(`❌ 標記失敗：${e.message}`, 'error');
+        throw e;
+      }
+    },
+    [schedule, showToast, scheduleCalSuffix],
+  );
+
+  const handleCancelSchedule = useCallback(
+    async (s) => {
+      try {
+        const res = await schedule.cancelSchedule(s.schedule_id);
+        showToast(`🗑 已取消排程：${res.schedule.order_no || res.schedule.schedule_id}${scheduleCalSuffix(res.calendar_status)}`);
+        return res;
+      } catch (e) {
+        showToast(`❌ 取消失敗：${e.message}`, 'error');
+        throw e;
+      }
+    },
+    [schedule, showToast, scheduleCalSuffix],
+  );
+
+  const handleResyncSchedule = useCallback(
+    async () => {
+      try {
+        const res = await schedule.resync();
+        return res;
+      } catch (e) {
+        showToast(`❌ 重新同步失敗：${e.message}`, 'error');
+        throw e;
+      }
+    },
+    [schedule, showToast],
+  );
+
   // 🌍 訪客展示路由：#/lookbook 只渲染純展示圖鑑（無登入／無分頁／無內部功能）
   if (guestRoute) {
     return (
@@ -363,7 +450,7 @@ export default function App() {
             onClick={handleSync}
             className="min-h-touch flex items-center gap-1 rounded-xl bg-white/10 px-3 text-sm font-bold text-white transition active:bg-white/20"
           >
-            <span className={inventory.loading || workOrders.loading || production.loading ? 'animate-spin' : ''}>⟳</span> 同步
+            <span className={inventory.loading || workOrders.loading || production.loading || schedule.loading ? 'animate-spin' : ''}>⟳</span> 同步
           </button>
         </div>
         <p className="mt-1 text-xs text-blue-200">
@@ -441,6 +528,21 @@ export default function App() {
             showToast={showToast}
             onItemsUpdated={inventory.applyItem}
             onOpenScanner={() => openScanner('ship')}
+            goToSettings={() => setTab('settings')}
+          />
+        )}
+        {tab === 'sched' && (
+          <ScheduleTab
+            schedules={schedule.schedules}
+            loading={schedule.loading}
+            error={schedule.error}
+            showToast={showToast}
+            onCreate={handleCreateSchedule}
+            onUpdate={handleUpdateSchedule}
+            onMarkShipped={handleMarkScheduleShipped}
+            onCancel={handleCancelSchedule}
+            onResync={handleResyncSchedule}
+            onRefresh={schedule.refresh}
             goToSettings={() => setTab('settings')}
           />
         )}

@@ -217,6 +217,47 @@ var PWO_YARN_HEADERS = [
   'Deducted_Time',
 ];
 
+/* ============================================================
+ * 🚢 V3：訂單出貨排程（SHIPMENT_SCHEDULE）＋ Google Calendar 單向同步
+ * ------------------------------------------------------------
+ * 收到訂單後的排程動作（計畫層看板，不扣庫存）：
+ * - 原料到期日 / 配件(客供|自備)到期日 / 洗標吊牌(客供|自備)到期日 /
+ *   場內預計完成 / 預計出貨日 → 五節點進度，App「出貨倒數」分頁以天倒數
+ * - 只有「預計出貨日 (Ship_Date)」同步為共用 Google Calendar 的整日事件
+ *   （行事曆 ID 填在下方 SCHEDULE_CALENDAR_ID；修改＝同 Event ID 覆蓋不重複）
+ * - 同步失敗 → Calendar_Status=待同步，每日 06:00 既有觸發器自動補推
+ * ============================================================ */
+var SHEET_SCHED = 'SHIPMENT_SCHEDULE';
+var SCHED_HEADERS = [
+  'Schedule_ID',       // SSyyMMdd-##（當日流水號）
+  'Order_No',          // 訂單編號（留空自動 PO-yyyyMMdd-##）
+  'Customer_Name',     // 客戶（可選用 CUSTOMERS 名單或直接輸入）
+  'Material_Due',      // 原料到期日（YYYY-MM-DD）
+  'Acc_Flag',          // 配件來源：客供 | 自備
+  'Acc_Due',           // 配件到期日
+  'Label_Flag',        // 洗標吊牌來源：客供 | 自備
+  'Label_Due',         // 洗標吊牌到期日
+  'Factory_Complete',  // 場內預計完成（YYYY-MM-DD 或 YYYY-MM-DD HH:mm）
+  'Ship_Date',         // 🚢 預計出貨日（同步行事曆）
+  'Details',           // 明細（一行一項：款號 × 數量）
+  'Status',            // 待出貨 | 已出貨 | 已取消
+  'Calendar_Status',   // 未同步｜已同步｜待同步｜失敗：訊息｜未設定｜已刪除
+  'Calendar_Event_ID', // 行事曆事件 ID（防重複：更新時同 ID 覆蓋）
+  'Operator',          // 經辦人
+  'Remark',            // 備註
+  'Created_Time',
+  'Updated_Time',
+];
+var SCHED_STATUS_PENDING = '待出貨';
+var SCHED_STATUS_SHIPPED = '已出貨';
+var SCHED_STATUS_CANCEL = '已取消';
+var SCHED_FLAGS = ['客供', '自備'];
+
+/** 🚢 共用行事曆：填「出貨排程」Calendar ID（行事曆設定 → 整合行事曆 → gCal id）。
+ *  留空 = 不做行事曆同步（App 功能照常，Calendar_Status 顯示「未設定」）。
+ *  首次啟用同步時會要求 CalendarApp 權限 → 到 Apps Script 編輯器重新執行授權一次。 */
+var SCHEDULE_CALENDAR_ID = '';
+
 var PWO_DESTS = ['入倉庫備庫', '訂單出貨'];
 var PWO_STATUS_DRAFT = '草稿';
 var PWO_STATUS_ACTIVE = '生產中';
@@ -346,6 +387,25 @@ function doPost(e) {
       case 'set_items_active':
         data = setItemsActive_(req);
         break;
+      /* ---- 🚢 訂單出貨排程（計畫層看板，不扣庫存）＋ 行事曆同步 ---- */
+      case 'list_schedule':
+        data = listSchedule_();
+        break;
+      case 'create_schedule':
+        data = createSchedule_(req);
+        break;
+      case 'update_schedule':
+        data = updateSchedule_(req);
+        break;
+      case 'mark_schedule_shipped':
+        data = markScheduleShipped_(req);
+        break;
+      case 'cancel_schedule':
+        data = cancelSchedule_(req);
+        break;
+      case 'resync_schedule':
+        data = resyncSchedule_(req);
+        break;
       default:
         throw new Error(
           '未知的 action：' + req.action +
@@ -361,6 +421,8 @@ function doPost(e) {
             'list_production_orders', 'create_production_order', 'start_production_order',
             'complete_production_order', 'ship_production_order', 'list_stock_logs',
             'list_dormant', 'set_items_active',
+            'list_schedule', 'create_schedule', 'update_schedule',
+            'mark_schedule_shipped', 'cancel_schedule', 'resync_schedule',
           ].join(' / ') +
           '。請在 Apps Script 編輯器：部署 → 管理部署作業 → 編輯(筆) → 版本選「新版本」→ 部署',
         );
@@ -1128,6 +1190,15 @@ function checkDueWorkOrders() {
   // V2：新版工作令（PRODUCTION_ORDERS）逾期檢查（同一觸發器一次做完）
   changed += checkDuePWOs_(todayYMD);
   Logger.log('新版工作令到期檢查完成（累計 %s 張轉為「待確認」）', changed);
+
+  // V3：🚢 出貨排程 → 共用 Google Calendar 對帳（補推「待同步／失敗」，
+  //     事件被手動刪除者也會自動重建）。行事曆 ID 未設定時自動略過。
+  try {
+    var calMsg = syncScheduleCalendar_();
+    Logger.log('出貨排程行事曆對帳完成：%s', calMsg);
+  } catch (calErr) {
+    Logger.log('出貨排程行事曆對帳失敗：%s', String(calErr && calErr.message ? calErr.message : calErr));
+  }
 }
 
 /** V2：新版工作令到期檢查——Due_Date 已過且「生產中」→ 自動改「待確認」，回傳筆數 */
@@ -2413,8 +2484,12 @@ function setupSheets() {
   Logger.log('建立 %s …', ensureSheet_(SHEET_YARN));     // V2 紗線庫存
   Logger.log('建立 %s …', ensureSheet_(SHEET_PWO));      // V2 新版工作令
   Logger.log('建立 %s …', ensureSheet_(SHEET_PWO_YARN)); // V2 工單領紗明細
+  Logger.log('建立 %s …', ensureSheet_(SHEET_SCHED));    // V3 出貨排程
   installDueCheckTrigger();
   Logger.log('完成！接著執行 seedDemoData() 可灌入示範料件（現有資料不會被覆蓋）');
+  if (SCHEDULE_CALENDAR_ID) {
+    Logger.log('如尚未授權 Calendar 權限，請再執行一次 resyncSchedule() 或任一觸發函式完成授權');
+  }
 }
 
 function ensureSheet_(name) {
@@ -2430,6 +2505,7 @@ function ensureSheet_(name) {
               : (name === SHEET_YARN) ? YARN_HEADERS
               : (name === SHEET_PWO) ? PWO_HEADERS
               : (name === SHEET_PWO_YARN) ? PWO_YARN_HEADERS
+              : (name === SHEET_SCHED) ? SCHED_HEADERS
               : LOG_HEADERS;
   if (!sheet) {
     // 全新建表：一次寫入所有標題
@@ -3087,4 +3163,454 @@ function shipProductionOrder_(req) {
   } finally {
     try { lock.releaseLock(); } catch (e) { /* ignore */ }
   }
+}
+
+/* ============================================================
+ * 🚢 V3：訂單出貨排程（SHIPMENT_SCHEDULE）＋ Google Calendar 單向同步
+ * ------------------------------------------------------------
+ * API：
+ *   { action: "list_schedule" }                    → 全部排程陣列（依出貨日由近到遠）
+ *   { action: "create_schedule",
+ *     order_no?, customer_name?, material_due?,
+ *     acc_flag?, acc_due?, label_flag?, label_due?,
+ *     factory_complete?, ship_date(必填), details?,
+ *     operator, remark? }                          → 新增排程（SSyyMMdd-##）
+ *   { action: "update_schedule",
+ *     schedule_id, …上述欄位任一, operator }        → 修改（缺的欄不動，會重新同步行事曆）
+ *   { action: "mark_schedule_shipped",
+ *     schedule_id, operator, remark? }              → 待出貨 → 已出貨（行事曆事件標 ✅）
+ *   { action: "cancel_schedule",
+ *     schedule_id, operator }                       → 已取消（刪除行事曆事件）
+ *   { action: "resync_schedule", operator }         → 全表對帳：補推漏失／被刪的事件
+ * 行事曆行為：
+ *   - 只有 Ship_Date 產生整日事件（標題＋五節點描述），不碰私人物件何人其他日曆
+ *   - 修改＝同 Calendar_Event_ID 覆蓋更新，不會重複出現
+ *   - SCHEDULE_CALENDAR_ID 未設定 → Calendar_Status=「未設定」（App 功能照常）
+ *   - 每日 06:00 checkDueWorkOrders 觸發器會自動補推「待同步／失敗」
+ * ============================================================ */
+
+/** 共用行事曆物件；未設定 ID 回 null */
+function scheduleCal_() {
+  var id = String(SCHEDULE_CALENDAR_ID || '').trim();
+  if (!id) return null;
+  return CalendarApp.getCalendarById(id);
+}
+
+/** 'YYYY-MM-DD'（或含時間的字串前段）→ 以本試算表時區的 Date；格式錯回 null */
+function schedDateObj_(v) {
+  var m = String(v || '').trim().match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (!m) return null;
+  var y = parseInt(m[1], 10), mo = parseInt(m[2], 10), d = parseInt(m[3], 10);
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  var date = new Date(y, mo - 1, d);
+  return isNaN(date.getTime()) ? null : date;
+}
+
+/** 從 Details（一行一項「款號 × 數量」）合計數量，給行事曆標題用；算不出回 '' */
+function schedDetailQtySummary_(details) {
+  var lines = String(details || '').split(/\r?\n/);
+  var total = 0, any = false;
+  for (var i = 0; i < lines.length; i++) {
+    var m = String(lines[i]).match(/[x×]\s*\*?\s*([\d,]+(?:\.\d+)?)\s*$/i);
+    if (m) {
+      var n = Number(m[1].replace(/,/g, ''));
+      if (!isNaN(n)) { total += n; any = true; }
+    }
+  }
+  return any ? '合計 ' + total : '';
+}
+
+/** 行事曆事件標題（整日事件）：🚢出貨 PO-xxx｜客戶｜合計 N */
+function scheduleEventTitle_(s) {
+  var qty = schedDetailQtySummary_(s.details);
+  var parts = ['🚢出貨'];
+  if (s.order_no) parts.push(s.order_no);
+  if (s.customer_name) parts.push(s.customer_name);
+  if (qty) parts.push(qty);
+  return parts.join('｜');
+}
+
+/** 行事曆事件描述：五節點日期＋明細＋備註 */
+function scheduleEventDesc_(s) {
+  var d = '🚢 出貨節點：\n';
+  if (s.material_due) d += '🧵 原料到期：' + s.material_due + '\n';
+  if (s.acc_due) d += '🧷 配件（' + (s.acc_flag || '自備') + '）：' + s.acc_due + '\n';
+  if (s.label_due) d += '🏷️ 洗標吊牌（' + (s.label_flag || '自備') + '）：' + s.label_due + '\n';
+  if (s.factory_complete) d += '🏭 場內預計完成：' + s.factory_complete + '\n';
+  d += '🚢 預計出貨：' + s.ship_date + '\n';
+  if (String(s.details || '').trim()) d += '\n明細：\n' + String(s.details).trim() + '\n';
+  if (String(s.remark || '').trim()) d += '\n備註：' + String(s.remark).trim() + '\n';
+  d += '\n（由 帽廠庫存管家 自動同步；修改排程即更新此事件）';
+  return d;
+}
+
+/** 寫入／更新共用行事曆事件；回傳 { calendar_status, calendar_event_id? }（例外自動轉為失敗訊息） */
+function upsertScheduleEvent_(s) {
+  var cal = scheduleCal_();
+  if (!cal) return { calendar_status: '未設定', calendar_event_id: s.calendar_event_id || '' };
+  var dateObj = schedDateObj_(s.ship_date);
+  if (!dateObj) return { calendar_status: '失敗：出貨日格式需為 YYYY-MM-DD', calendar_event_id: s.calendar_event_id || '' };
+  var title = scheduleEventTitle_(s);
+  var desc = scheduleEventDesc_(s);
+  if (s.status === SCHED_STATUS_SHIPPED) { title = '✅' + title; }
+  try {
+    var ev = null;
+    var id = String(s.calendar_event_id || '');
+    if (id) {
+      try {
+        ev = cal.getEventById(id);
+        if (ev && ev.isRemoved && ev.isRemoved()) ev = null;
+      } catch (eId) { ev = null; }
+    }
+    if (!ev) {
+      if (s.status === SCHED_STATUS_CANCEL) return { calendar_status: '已刪除', calendar_event_id: '' };
+      ev = cal.createAllDayEvent(title, dateObj);
+    } else {
+      ev.setTitle(title);
+      ev.setAllDayDates(dateObj, dateObj); // 整日事件改期（非重複事件安全）
+    }
+    ev.setDescription(desc);
+    return { calendar_status: '已同步', calendar_event_id: ev.getId() };
+  } catch (err) {
+    if (s.status === SCHED_STATUS_CANCEL) return { calendar_status: '已刪除', calendar_event_id: '' };
+    return { calendar_status: '失敗：' + String(err && err.message ? err.message : err),
+             calendar_event_id: s.calendar_event_id || '' };
+  }
+}
+
+/** 刪除行事曆事件（已取消排程用）；例外不拋出只回訊息 */
+function deleteScheduleEvent_(s) {
+  var cal = scheduleCal_();
+  if (!cal) return '未設定';
+  var id = String(s.calendar_event_id || '');
+  if (!id) return '已刪除';
+  try {
+    var ev = cal.getEventById(id);
+    if (ev) { ev.deleteEvent(); return '已刪除'; }
+    return '已刪除'; // 事件本來就不存在 → 視同已刪除
+  } catch (err) {
+    return '已刪除'; // 抓不到就不留尾巴，不阻擋取消作業
+  }
+}
+
+/** 工作表列 → 排程物件（底線小寫欄位，前端同款） */
+function rowToSchedule_(row) {
+  var ymd = function (v) { return dueYMD_(v) || String(v).trim(); };
+  return {
+    schedule_id: String(row[0]).trim(),
+    order_no: String(row[1]).trim(),
+    customer_name: String(row[2]).trim(),
+    material_due: ymd(row[3]),
+    acc_flag: String(row[4]).trim(),
+    acc_due: ymd(row[5]),
+    label_flag: String(row[6]).trim(),
+    label_due: ymd(row[7]),
+    factory_complete: String(row[8]).trim(),
+    ship_date: ymd(row[9]),
+    details: String(row[10]).trim(),
+    status: String(row[11]).trim() || SCHED_STATUS_PENDING,
+    calendar_status: String(row[12]).trim(),
+    calendar_event_id: String(row[13]).trim(),
+    operator: String(row[14]).trim(),
+    remark: String(row[15]).trim(),
+    created_time: String(row[16]).trim(),
+    updated_time: String(row[17]).trim(),
+  };
+}
+
+/** 依 Schedule_ID（不分大小寫）找列號；找不到回 -1 */
+function findSchedRow_(sheet, id) {
+  var target = String(id || '').trim().toUpperCase();
+  var last = sheet.getLastRow();
+  if (last < 2) return -1;
+  var ids = sheet.getRange(2, 1, last - 1, 1).getValues();
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]).trim().toUpperCase() === target) return i + 2;
+  }
+  return -1;
+}
+
+/** 排程單號自動編號：SSyyMMdd-##（當日流水號） */
+function nextScheduleId_() {
+  var today = Utilities.formatDate(new Date(), nowTz_(), 'yyMMdd');
+  var prefix = 'SS' + today + '-';
+  var sheet = getSheet_(SHEET_SCHED);
+  var max = 0;
+  var last = sheet.getLastRow();
+  if (last >= 2) {
+    var ids = sheet.getRange(2, 1, last - 1, 1).getValues();
+    for (var i = 0; i < ids.length; i++) {
+      var s = String(ids[i][0]).trim();
+      if (s.indexOf(prefix) === 0) {
+        var n = parseInt(s.slice(prefix.length), 10);
+        if (!isNaN(n) && n > max) max = n;
+      }
+    }
+  }
+  return prefix + ('00' + (max + 1)).slice(-2);
+}
+
+/** 訂單編號自動編號：POyyyyMMdd-##（當日流水號；只看 SHIPMENT_SCHEDULE） */
+function nextOrderNo_() {
+  var today = Utilities.formatDate(new Date(), nowTz_(), 'yyyyMMdd');
+  var prefix = 'PO' + today + '-';
+  var sheet = getSheet_(SHEET_SCHED);
+  var max = 0;
+  var last = sheet.getLastRow();
+  if (last >= 2) {
+    var noes = sheet.getRange(2, 2, last - 1, 1).getValues();
+    for (var i = 0; i < noes.length; i++) {
+      var s = String(noes[i][0]).trim();
+      if (s.indexOf(prefix) === 0) {
+        var n = parseInt(s.slice(prefix.length), 10);
+        if (!isNaN(n) && n > max) max = n;
+      }
+    }
+  }
+  return prefix + ('00' + (max + 1)).slice(-2);
+}
+
+/** 日期欄位共用驗證：允許空字串；有值必須為 YYYY-MM-DD（dueYMD_ 檢核） */
+function schedOptDate_(v, label) {
+  var s = String(v || '').trim();
+  if (!s) return '';
+  if (dueYMD_(s) === '') throw new Error(label + ' 格式需為 YYYY-MM-DD：' + s);
+  return dueYMD_(s);
+}
+
+/** 來源旗標驗證：客供 | 自備（留空＝預設自備） */
+function schedOptFlag_(v, label) {
+  var s = String(v || '').trim();
+  if (!s) return '自備';
+  if (SCHED_FLAGS.indexOf(s) === -1) {
+    throw new Error(label + ' 必須為：客供 / 自備，收到：' + s);
+  }
+  return s;
+}
+
+/** 全部排程清單（依出貨日由近到遠；已取消排到最後） */
+function listSchedule_() {
+  var sheet = getSheet_(SHEET_SCHED);
+  var values = sheet.getDataRange().getValues();
+  var rows = [];
+  for (var i = 1; i < values.length; i++) {
+    if (String(values[i][0]).trim() === '') continue;
+    rows.push(rowToSchedule_(values[i]));
+  }
+  rows.sort(function (a, b) {
+    var ca = (a.status === SCHED_STATUS_CANCEL) ? 1 : 0;
+    var cb = (b.status === SCHED_STATUS_CANCEL) ? 1 : 0;
+    if (ca !== cb) return ca - cb;
+    var da = dueYMD_(a.ship_date) || '9999-12-31';
+    var db = dueYMD_(b.ship_date) || '9999-12-31';
+    return da.localeCompare(db) || a.schedule_id.localeCompare(b.schedule_id);
+  });
+  return rows;
+}
+
+/** 排程列套用行事曆同步結果（Calendar_Status/Event_ID 兩欄一次寫回，例外不拋出） */
+function schedApplyCalendar_(sheet, rowNum, s) {
+  var res;
+  try {
+    res = upsertScheduleEvent_(s);
+  } catch (err) {
+    res = { calendar_status: '失敗：' + String(err && err.message ? err.message : err),
+            calendar_event_id: s.calendar_event_id || '' };
+  }
+  sheet.getRange(rowNum, 13).setValue(res.calendar_status);
+  sheet.getRange(rowNum, 14).setValue(res.calendar_event_id || '');
+  return res;
+}
+
+/** 新增排程（計畫層，不動庫存）。ship_date 必填，其餘選填。 */
+function createSchedule_(req) {
+  var shipDate = dueYMD_(req.ship_date);
+  if (!String(req.ship_date || '').trim()) throw new Error('缺少預計出貨日 Ship_Date');
+  if (shipDate === '') throw new Error('Ship_Date 格式需為 YYYY-MM-DD：' + req.ship_date);
+  var customer = String(req.customer_name || '').trim();
+  var remark = String(req.remark || '').trim();
+  var details = String(req.details || '').trim();
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var sheet = getSheet_(SHEET_SCHED);
+    var id = nextScheduleId_();
+    var orderNo = String(req.order_no || '').trim() || nextOrderNo_();
+    var accDue = schedOptDate_(req.acc_due, '配件到期日');
+    var labelDue = schedOptDate_(req.label_due, '洗標吊牌到期日');
+    var row = [
+      id, orderNo, customer, schedOptDate_(req.material_due, '原料到期日'),
+      schedOptFlag_(req.acc_flag, '配件'), accDue,
+      schedOptFlag_(req.label_flag, '洗標吊牌'), labelDue,
+      String(req.factory_complete || '').trim(), shipDate, details,
+      SCHED_STATUS_PENDING, '', '', String(req.operator || '').trim(), remark,
+      now_(), now_(),
+    ];
+    sheet.appendRow(row);
+    var rowNum = sheet.getLastRow();
+    var sched = rowToSchedule_(sheet.getRange(rowNum, 1, 1, SCHED_HEADERS.length).getValues()[0]);
+    var cal = schedApplyCalendar_(sheet, rowNum, sched);
+    sched.calendar_status = cal.calendar_status;
+    sched.calendar_event_id = cal.calendar_event_id;
+    return { schedule: sched, calendar_status: cal.calendar_status };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
+}
+
+/** 修改排程：缺的欄位不動；改了出貨日／標題相關欄位 → 自動重新同步行事曆 */
+function updateSchedule_(req) {
+  var id = String(req.schedule_id || '').trim();
+  if (!id) throw new Error('缺少 Schedule_ID');
+  var operator = String(req.operator || '').trim();
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var sheet = getSheet_(SHEET_SCHED);
+    var row = findSchedRow_(sheet, id);
+    if (row === -1) throw new Error('找不到排程：' + id);
+    var s = rowToSchedule_(sheet.getRange(row, 1, 1, SCHED_HEADERS.length).getValues()[0]);
+    // 可更新欄位（undefined = 不動；null 或空字串 = 清空）
+    var patchable = {
+      order_no: 2, customer_name: 3, material_due: 4, acc_flag: 5, acc_due: 6,
+      label_flag: 7, label_due: 8, factory_complete: 9, ship_date: 10, details: 11, remark: 16,
+    };
+    // --- 第一段：先全部驗證／正規化（格式錯誤時未動到任何欄位） ---
+    var writes = []; // { col, val }
+    Object.keys(patchable).forEach(function (key) {
+      if (!(key in req)) return;
+      var v = req[key];
+      if (v === null) v = '';
+      var norm;
+      if (key === 'ship_date') {
+        var d = dueYMD_(v);
+        if (String(v || '').trim() !== '' && d === '') throw new Error('Ship_Date 格式需為 YYYY-MM-DD：' + v);
+        norm = d; // 清空 = ''（前端防呆擋下）
+      } else if (key === 'material_due' || key === 'acc_due' || key === 'label_due') {
+        norm = schedOptDate_(v, key === 'material_due' ? '原料到期日' : key === 'acc_due' ? '配件到期日' : '洗標吊牌到期日');
+      } else if (key === 'acc_flag' || key === 'label_flag') {
+        norm = schedOptFlag_(v, key === 'acc_flag' ? '配件' : '洗標吊牌');
+      } else {
+        norm = String(v).trim();
+      }
+      writes.push({ col: patchable[key], val: norm });
+    });
+    // --- 第二段：一次寫入 ---
+    writes.forEach(function (w) { sheet.getRange(row, w.col).setValue(w.val); });
+    sheet.getRange(row, 15).setValue(operator || s.operator); // Operator 欄＝最後異動經辦
+    sheet.getRange(row, 18).setValue(now_());                  // Updated_Time
+    var sched = rowToSchedule_(sheet.getRange(row, 1, 1, SCHED_HEADERS.length).getValues()[0]);
+    var cal = schedApplyCalendar_(sheet, row, sched);
+    sched.calendar_status = cal.calendar_status;
+    sched.calendar_event_id = cal.calendar_event_id;
+    return { schedule: sched, calendar_status: cal.calendar_status };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
+}
+
+/** 待出貨 → 已出貨：行事曆事件改標「✅已出貨」保留紀錄 */
+function markScheduleShipped_(req) {
+  var id = String(req.schedule_id || '').trim();
+  if (!id) throw new Error('缺少 Schedule_ID');
+  var operator = String(req.operator || '').trim();
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var sheet = getSheet_(SHEET_SCHED);
+    var row = findSchedRow_(sheet, id);
+    if (row === -1) throw new Error('找不到排程：' + id);
+    var s = rowToSchedule_(sheet.getRange(row, 1, 1, SCHED_HEADERS.length).getValues()[0]);
+    if (s.status === SCHED_STATUS_CANCEL) throw new Error('此排程已取消，不可標記出貨');
+    sheet.getRange(row, 12).setValue(SCHED_STATUS_SHIPPED);
+    if (String(req.remark || '').trim()) {
+      sheet.getRange(row, 16).setValue(s.remark ? s.remark + '；' + String(req.remark).trim() : String(req.remark).trim());
+    }
+    if (operator) sheet.getRange(row, 15).setValue(operator);
+    sheet.getRange(row, 18).setValue(now_());
+    var sched = rowToSchedule_(sheet.getRange(row, 1, 1, SCHED_HEADERS.length).getValues()[0]);
+    var cal = schedApplyCalendar_(sheet, row, sched); // 事件標題加 ✅
+    sched.status = SCHED_STATUS_SHIPPED;
+    sched.calendar_status = cal.calendar_status;
+    return { schedule: sched, calendar_status: cal.calendar_status };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
+}
+
+/** 待出貨 → 已取消：同步刪除行事曆事件 */
+function cancelSchedule_(req) {
+  var id = String(req.schedule_id || '').trim();
+  if (!id) throw new Error('缺少 Schedule_ID');
+  var operator = String(req.operator || '').trim();
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var sheet = getSheet_(SHEET_SCHED);
+    var row = findSchedRow_(sheet, id);
+    if (row === -1) throw new Error('找不到排程：' + id);
+    var s = rowToSchedule_(sheet.getRange(row, 1, 1, SCHED_HEADERS.length).getValues()[0]);
+    if (s.status === SCHED_STATUS_SHIPPED) throw new Error('此排程已出貨，不可取消');
+    sheet.getRange(row, 12).setValue(SCHED_STATUS_CANCEL);
+    if (operator) sheet.getRange(row, 15).setValue(operator);
+    sheet.getRange(row, 18).setValue(now_());
+    s.status = SCHED_STATUS_CANCEL;
+    var calMsg = deleteScheduleEvent_(s);
+    sheet.getRange(row, 13).setValue(calMsg);
+    sheet.getRange(row, 14).setValue('');
+    s.calendar_status = calMsg;
+    s.calendar_event_id = '';
+    return { schedule: s };
+  } finally {
+    try { lock.releaseLock(); } catch (e) { /* ignore */ }
+  }
+}
+
+/** 行事曆全域對帳：需要者（未同步／待同步／失敗／缺 Event_ID）逐一 upsert；
+ *  已取消的不補。回傳訊息（寫進 Logger），回應另回 { synced, failed } */
+function syncScheduleCalendar_() {
+  var sheet = getSheet_(SHEET_SCHED);
+  var last = sheet.getLastRow();
+  if (last < 2) return '沒有排程資料';
+  var values = sheet.getRange(2, 1, last - 1, SCHED_HEADERS.length).getValues();
+  var synced = 0, failed = 0, skipped = 0, noCal = false;
+  for (var i = 0; i < values.length; i++) {
+    var s = rowToSchedule_(values[i]);
+    if (s.status === SCHED_STATUS_CANCEL) continue;
+    var id = String(s.schedule_id || '').trim();
+    if (!id && !s.ship_date) continue; // 半調子列不動
+    var row = i + 2;
+    var tricky = !s.calendar_status ||
+      s.calendar_status !== '已同步' ||
+      !s.calendar_event_id;
+    if (!tricky) { skipped++; continue; }
+    var res = schedApplyCalendar_(sheet, row, s);
+    if (res.calendar_status === '未設定') { noCal = true; }
+    if (res.calendar_status === '已同步') synced++;
+    else if (res.calendar_status !== '未設定') failed++;
+  }
+  if (noCal) return '未設定 SCHEDULE_CALENDAR_ID，略過行事曆同步（排程功能照常）';
+  return '補推 ' + synced + ' 筆、失敗 ' + failed + ' 筆、本就正常 ' + skipped + ' 筆';
+}
+
+/** 手動／API 對帳：回傳補推結果摘要（前端「⟳ 重新同步」按鈕用） */
+function resyncSchedule_(req) {
+  var operator = String(req.operator || '').trim();
+  if (operator) {
+    Logger.log('resync_schedule 由 %s 執行', operator);
+  }
+  var msg = syncScheduleCalendar_();
+  var sheet = getSheet_(SHEET_SCHED);
+  var last = sheet.getLastRow();
+  var values = last >= 2 ? sheet.getRange(2, 1, last - 1, SCHED_HEADERS.length).getValues() : [];
+  var synced = 0, failed = 0;
+  for (var i = 0; i < values.length; i++) {
+    var st = String(values[i][12]).trim();
+    var s0 = rowToSchedule_(values[i]);
+    if (s0.status === SCHED_STATUS_CANCEL) continue;
+    if (st === '已同步') synced++;
+    else if (st.indexOf('失敗') === 0) failed++;
+  }
+  return { message: msg, synced: synced, failed: failed };
 }
