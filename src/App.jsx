@@ -49,6 +49,7 @@ export default function App() {
   const [tab, setTab] = useState('search');
   const [query, setQuery] = useState(''); // 查詢頁搜尋字
   const [toast, setToast] = useState(null); // { type: 'success'|'error', msg }
+  const [showMore, setShowMore] = useState(false); // ⋯ 更多功能選單開闔
 
   // 🌍 訪客展示模式：#/lookbook 路由（跟隨 hash 變化，可分享後返回）
   const [guestRoute, setGuestRoute] = useState(isLookbookRoute);
@@ -69,6 +70,14 @@ export default function App() {
       t.roles.some((r) => extras.includes(r)),
   );
   const allowedKeys = visibleTabs.map((t) => t.key).join(',');
+
+  // 📥 分頁收納（2026-11）：底欄只留常用 5 頁（查詢／出入庫／出庫出貨／出貨排程／設定），
+  //    其餘（生產工令／工單管理／品項健檢／紀錄／款式圖鑑／營運報表）收進「⋯ 更多」選單；
+  //    非管理者本來就只有 5 頁 → 不會出現「更多」按鈕，畫面維持不變
+  const PRIMARY_TAB_KEYS = ['search', 'action', 'ship', 'sched', 'settings'];
+  const mainTabs = visibleTabs.filter((t) => PRIMARY_TAB_KEYS.includes(t.key));
+  const moreTabs = visibleTabs.filter((t) => !PRIMARY_TAB_KEYS.includes(t.key));
+  const inMoreMenu = moreTabs.some((t) => t.key === tab); // 目前分頁在「更多」內 → 該按鈕高亮
 
   // 經辦身分變動後，當前分頁可能被收走（例：非管理者停在「紀錄」）→ 跳回庫存查詢
   useEffect(() => {
@@ -573,11 +582,11 @@ export default function App() {
         )}
       </main>
 
-      {/* ===== 底部分頁導覽（大按鈕、好戴手套點擊） ===== */}
+      {/* ===== 底部分頁導覽（大按鈕、好戴手套點擊；收進「⋯ 更多」見 PRIMARY_TAB_KEYS） ===== */}
       <nav className="fixed inset-x-0 bottom-0 z-20 border-t border-slate-200 bg-white/95 backdrop-blur">
         <div className="mx-auto flex max-w-lg justify-around pb-[env(safe-area-inset-bottom)]">
           {/* 🎭 角色分權：只渲染此經辦可用的分頁；AnalyticsTab／StockLogTab 內另有第二道權限防護 */}
-          {visibleTabs.map((t) => (
+          {mainTabs.map((t) => (
             <button
               key={t.key}
               onClick={() => setTab(t.key)}
@@ -590,8 +599,56 @@ export default function App() {
               {tab === t.key && <span className="mt-0.5 h-1 w-6 rounded-full bg-blue-700" />}
             </button>
           ))}
+          {/* ⋯ 更多：收納生產工令／工單管理／品項健檢／紀錄／款式圖鑑／營運報表等 */}
+          {moreTabs.length > 0 && (
+            <button
+              onClick={() => setShowMore((v) => !v)}
+              className={`flex min-h-touch flex-1 flex-col items-center justify-center py-2 text-xs font-bold transition ${
+                inMoreMenu ? 'text-blue-700' : 'text-slate-400'
+              }`}
+            >
+              <span className="mb-0.5 text-2xl leading-none">⋯</span>
+              更多
+              {inMoreMenu && <span className="mt-0.5 h-1 w-6 rounded-full bg-blue-700" />}
+            </button>
+          )}
         </div>
       </nav>
+
+      {/* ===== ⋯ 更多功能選單（底部抽屜） ===== */}
+      {showMore && (
+        <div
+          className="fixed inset-0 z-30 flex items-end justify-center bg-black/50 p-4"
+          onClick={() => setShowMore(false)}
+        >
+          <div
+            className="w-full max-w-lg rounded-t-3xl bg-white p-5 pb-[calc(1rem+env(safe-area-inset-bottom))] shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-lg font-extrabold text-slate-800">⋯ 更多功能</h3>
+              <button className="px-2 text-slate-400" onClick={() => setShowMore(false)}>✕</button>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {moreTabs.map((t) => (
+                <button
+                  key={t.key}
+                  onClick={() => {
+                    setTab(t.key);
+                    setShowMore(false);
+                  }}
+                  className={`flex min-h-touch flex-col items-center justify-center gap-1 rounded-2xl py-3 text-xs font-bold transition active:scale-[0.97] ${
+                    tab === t.key ? 'bg-blue-50 text-blue-700' : 'bg-slate-50 text-slate-600 active:bg-slate-200'
+                  }`}
+                >
+                  <span className="text-2xl leading-none">{t.icon}</span>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ===== 相機掃碼（全螢幕覆蓋層） ===== */}
       {scanFor && (

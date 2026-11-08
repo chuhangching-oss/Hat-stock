@@ -130,6 +130,11 @@ export default function BatchItemPicker({ open, mode = 'OUT', items, force = fal
     if (invalid > 0) {
       showToast(`⚠️ ${invalid} 款未填／填錯數量，已自動略過，帶入其餘 ${list.length} 款`);
     }
+    // ✅ 整批帶入成功 → 清空預選清單（勾選／數量／搜尋字／類別篩選），
+    //    讓下一次打開是乾淨的選單；驗證失敗（上方提前 return）不會清，可修正後重送
+    setSel({});
+    setFilter('');
+    setCategory('全部');
     onPick(list);
   }
 
